@@ -1,0 +1,4 @@
+OpenXcom Extended / OpenXcom upstream base
+Commit: 22f1aae75c3047ceb0c0e24abe74938fa7230793
+License: GNU GPL v3
+Modified source snapshot prepared: 2026-09-15
