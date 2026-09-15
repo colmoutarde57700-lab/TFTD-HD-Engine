@@ -61,4 +61,7 @@ The reconstructed repository is **successfully buildable with the exact historic
 
 It does **not** reproduce the historical AUTONOME file byte-for-byte because that file used a different standalone/static dependency packaging step. Reproducing that exact file would additionally require the exact static SDL/media archives and standalone link recipe.
 
-This verification is a compile/link and binary-structure comparison. The fresh executable still needs a normal smoke test on Windows before being attached to a public GitHub Release.
+This verification is a compile/link and binary-structure comparison. The fresh executable was subsequently smoke-tested successfully on Windows
+by the project owner, including verification of the current tactical menus
+and recent engine changes, and was then published as the Windows x64 build
+for the v0.1.0 pre-release.
