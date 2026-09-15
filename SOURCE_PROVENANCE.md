@@ -28,7 +28,23 @@ SHA-256:
 
 `4a4d49c81502556f46486dd6cbdd4a0d465a26c2e580158470baca657ca9d93a`
 
-The source reconstruction chain applied cleanly. The current packaging environment does not contain the exact LLVM-MinGW 2026-08-26 toolchain, so a fresh byte-for-byte Windows rebuild was not performed while preparing this repository package.
+The source reconstruction chain applied cleanly.
+
+On 2026-09-15, the reconstructed source tree was rebuilt from a clean
+directory using the preserved LLVM-MinGW UCRT 2026-08-26 x86_64
+toolchain (Clang 23.1.0). Ninja completed all 413/413 Windows x86-64
+Release compile/link steps successfully.
+
+The resulting repository build is not byte-identical to the historical
+AUTONOME reference executable because the repository build uses DLL-based
+SDL/media dependencies while the AUTONOME build used static SDL/media linkage.
+
+Application-level comparison found the exact same set of 23,283 unique
+OpenXcom:: symbols in both executables.
+
+The clean rebuild was subsequently smoke-tested successfully on Windows
+by the project owner and became the Windows x64 binary distributed with
+the v0.1.0 pre-release.
 
 ## Asset boundary
 
