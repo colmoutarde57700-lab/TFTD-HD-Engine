@@ -44,6 +44,13 @@ namespace OpenXcom
  */
 SoldierAvatarState::SoldierAvatarState(Base *base, size_t soldier) : _base(base), _soldier(soldier)
 {
+	// AQUANAUT_UI_FAMILY_V1-B: this screen is owned by Inventory and must
+	// stay in the same Aquanaut presentation space/content scale.
+	setUiFamily(UiFamily::Aquanaut);
+	setPresentationScale(Options::getAquanautUiScale());
+	Log(LOG_INFO) << "[AQUANAUT-UI FAMILY V1-B][ASSIGN] state=SoldierAvatarState family=Aquanaut"
+		<< " contentScale=" << Options::getAquanautUiScale();
+
 	_screen = false;
 
 	// Create objects

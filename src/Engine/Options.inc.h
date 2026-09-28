@@ -32,10 +32,17 @@ OPT SDLKey keyGeoLeft, keyGeoRight, keyGeoUp, keyGeoDown, keyGeoZoomIn, keyGeoZo
 // Battlescape options
 OPT ScrollType battleEdgeScroll;
 OPT PathPreview battleNewPreviewPath;
-OPT int battleScrollSpeed, battleDragScrollButton, battleFireSpeed, battleXcomSpeed, battleAlienSpeed, battleExplosionHeight, battlescapeScale, battleUiScale, battleHudOpacity, battleHudPanelOpacity;
+OPT int hdFogEdgeSoftnessPermille;
+OPT int battleScrollSpeed, battleDragScrollButton, battleFireSpeed, battleXcomSpeed, battleAlienSpeed, battleExplosionHeight, battlescapeScale, battleUiScale, battleHudOpacity, battleHudPanelOpacity, hdBedrockLutTopPermille, hdBedrockLutVerticalPermille, hdBedrockLutCoveredPermille, hdBedrockLumaD1Permille, hdBedrockLumaD3Permille,
+	hdLocalLightIntensityPermille, hdLocalLightRadiusPermille, hdHelmetLightIntensityPermille, hdHelmetLightRangeMilliTiles, hdHelmetLightCoreHalfAngleMilliDeg, hdHelmetLightOuterHalfAngleMilliDeg, hdHelmetMagneticLateralTintRPermille, hdHelmetMagneticLateralTintGPermille, hdHelmetMagneticLateralTintBPermille, hdFovBaseHalfAngleMilliDeg, hdFovPlasticAquaHalfAngleMilliDeg, hdFovIonHalfAngleMilliDeg, hdFovMagneticIonHalfAngleMilliDeg, hdSunlightIntensityPermille, hdShadowStrengthPermille, hdAmbientLightPermille, hdVisibilityInsetPermille,
+	// Deprecated V4 smooth-edge storage symbols: intentionally unregistered/unused by REAL HD FOV V1.
+	hdVisibilityFeatherPermille, hdVisibilityRoundPermille, hdVisibilitySmoothInsetPermille, hdVisibilityContrastPermille, hdVisibilityAaPermille, hdVisibilityMaskOpacityPermille,
+	hdProjectedShadowSoftnessPermille, hdProjectedShadowBiasPermille, hdProjectedShadowRangePermille, hdSmokeOpacityPermille, hdSmokeRadiusPermille, underwaterSmokeDissipation;
+OPT std::string hdMaterialGradeConfig;
 OPT bool traceAI, sneakyAI, battleInstantGrenade, battleNotifyDeath, battleTooltips, battleHairBleach, battleAutoEnd,
 	strafe, forceFire, showMoreStatsInInventoryView, allowPsionicCapture, skipNextTurnScreen, disableAutoEquip, battleDragScrollInvert,
-	battleUFOExtenderAccuracy, battleConfirmFireMode, battleSmoothCamera, noAlienPanicMessages, alienBleeding, hdGraphics, hdEnvironmentGrade, hdDecorAnimationDesync, battleHudHiddenByDefault;
+	battleUFOExtenderAccuracy, battleConfirmFireMode, battleSmoothCamera, noAlienPanicMessages, alienBleeding, hdGraphics, hdEnvironmentGrade, hdDepthLuminance, hdMaterialGrade, hdDecorAnimationDesync, battleHudHiddenByDefault,
+	hdLocalLightsEnabled, hdSurfaceSunlightEnabled, hdProjectedShadowsEnabled, hdSmokeVolumeEnabled, hdSmokeReplaceLegacy, hdUnderwaterSmokeEnabled, hdFovAuditProbeEnabled, hdDebugOverlay;
 OPT SDLKey keyBattleLeft, keyBattleRight, keyBattleUp, keyBattleDown, keyBattleLevelUp, keyBattleLevelDown, keyBattleCenterUnit, keyBattlePrevUnit, keyBattleNextUnit, keyBattleDeselectUnit,
 keyBattleUseLeftHand, keyBattleUseRightHand, keyBattleInventory, keyBattleMap, keyBattleOptions, keyBattleEndTurn, keyBattleAbort, keyBattleStats, keyBattleKneel,
 keyBattleReserveKneel, keyBattleReload, keyBattlePersonalLighting, keyBattleToggleHud, keyBattleReserveNone, keyBattleReserveSnap, keyBattleReserveAimed, keyBattleReserveAuto,

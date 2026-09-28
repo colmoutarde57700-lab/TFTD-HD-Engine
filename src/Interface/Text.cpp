@@ -499,7 +499,25 @@ int Text::getLineX(int line) const
  */
 void Text::draw()
 {
-	Surface::draw();
+	drawTextContents(nullptr);
+}
+
+void Text::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	composeHdWithPalette(canvas, images, -1);
+}
+
+void Text::composeHdWithPalette(HdCanvas &canvas, HdImageCache &, int paletteInvertMid)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas text(getWidth(), getHeight());
+	drawTextContents(&text, paletteInvertMid);
+	composeHdLayer(canvas, text);
+}
+
+void Text::drawTextContents(HdCanvas *canvas, int paletteInvertMid)
+{
+	if (!canvas) Surface::draw();
 	if (_text.empty() || _font == 0)
 	{
 		return;
@@ -513,12 +531,21 @@ void Text::draw()
 		r.h = getHeight();
 		r.x = 0;
 		r.y = 0;
-		this->drawRect(&r, 5);
+		if (canvas)
+		{
+			const SDL_Color c = getPalette()[5];
+			const HdRgba color{c.r, c.g, c.b, 255};
+			canvas->rectangle({0, 0, double(r.w), 1}, color);
+			canvas->rectangle({0, double(r.h) - 1, double(r.w), 1}, color);
+			canvas->rectangle({0, 0, 1, double(r.h)}, color);
+			canvas->rectangle({double(r.w) - 1, 0, 1, double(r.h)}, color);
+		}
+		else this->drawRect(&r, 5);
 		r.w-=2;
 		r.h-=2;
 		r.x++;
 		r.y++;
-		this->drawRect(&r, 0);
+		if (!canvas) this->drawRect(&r, 0);
 	}
 
 	int x = 0, y = 0, line = 0, height = 0;
@@ -567,6 +594,19 @@ void Text::draw()
 
 	// Invert text by inverting the font palette on index 3 (font palettes use indices 1-5)
 	int mid = _invert ? 3 : 0;
+	HdTextColor hdColor;
+	if (canvas)
+	{
+		for (size_t i = 0; i < hdColor.palette.size(); ++i)
+		{
+			const auto index = static_cast<Uint8>(paletteInvertMid >= 0 && i ?
+				2 * paletteInvertMid - static_cast<int>(i) : static_cast<int>(i));
+			const SDL_Color c = getPalette()[index];
+			hdColor.palette[i] = {c.r, c.g, c.b, static_cast<Uint8>(index ? 255 : 0)};
+		}
+		hdColor.multiplier = mul;
+		hdColor.inverseMid = mid;
+	}
 
 	// Draw each letter one by one
 	for (UString::const_iterator c = s.begin(); c != s.end(); ++c)
@@ -632,10 +672,18 @@ void Text::draw()
 		{
 			if (dir < 0)
 				x += dir * font->getCharSize(*c).w;
-			auto chr = font->getChar(*c);
-			chr.setX(x);
-			chr.setY(y);
-			ShaderDraw<PaletteShift>(ShaderSurface(this, 0, 0), ShaderCrop(chr), ShaderScalar(color), ShaderScalar(mul), ShaderScalar(mid));
+			if (canvas)
+			{
+				hdColor.offset = color;
+				font->appendHdChar(*canvas, *c, x, y, hdColor);
+			}
+			else
+			{
+				auto chr = font->getChar(*c);
+				chr.setX(x);
+				chr.setY(y);
+				ShaderDraw<PaletteShift>(ShaderSurface(this, 0, 0), ShaderCrop(chr), ShaderScalar(color), ShaderScalar(mul), ShaderScalar(mid));
+			}
 			if (dir > 0)
 				x += dir * font->getCharSize(*c).w;
 		}

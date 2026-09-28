@@ -56,6 +56,7 @@ public:
 	void setSelectedBase(size_t base);
 	/// Draws the mini base view.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Special handling for mouse hovers.
 	void mouseOver(Action *action, State *state) override;
 	void setColor(Uint8 color) override;

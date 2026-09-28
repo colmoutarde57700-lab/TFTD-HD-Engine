@@ -23,6 +23,7 @@
 #include "../Engine/RNG.h"
 #include "../Engine/Screen.h"
 #include "../Engine/Logger.h"
+#include "../Engine/HdUiPicture.h"
 #include "../Mod/AlienRace.h"
 #include "../Mod/Armor.h"
 #include "../Mod/Mod.h"
@@ -52,6 +53,27 @@
 
 namespace OpenXcom
 {
+
+namespace
+{
+Uint8 hdOpaqueBlackPaletteIndex(const SDL_Color *palette)
+{
+	if (!palette) return 1;
+	int best = 1;
+	int bestLuma = 0x7fffffff;
+	for (int i = 1; i < 256; ++i)
+	{
+		const int luma = (int)palette[i].r + (int)palette[i].g + (int)palette[i].b;
+		if (luma < bestLuma)
+		{
+			best = i;
+			bestLuma = luma;
+			if (luma == 0) break;
+		}
+	}
+	return (Uint8)best;
+}
+}
 
 /**
  * Initializes all the elements in the Next Turn screen.
@@ -109,7 +131,7 @@ NextTurnState::NextTurnState(SavedBattleGame *battleGame, BattlescapeState *stat
 	_txtMessage = new Text(320, 17, 0, 132);
 	_txtMessage2 = new Text(320, 33, 0, 156);
 	_txtMessage3 = new Text(320, 17, 0, 172);
-	_bg = new Surface(_game->getScreen()->getWidth(), _game->getScreen()->getWidth(), 0, 0);
+	_bg = new Surface(_game->getScreen()->getWidth(), _game->getScreen()->getHeight(), 0, 0);
 
 	// Set palette
 	battleGame->setPaletteByDepth(this);
@@ -134,14 +156,25 @@ NextTurnState::NextTurnState(SavedBattleGame *battleGame, BattlescapeState *stat
 	rect.w = _bg->getWidth();
 	rect.x = rect.y = 0;
 
-	// Note: un-hardcoded the color from 15 to ruleset value, default 15
+	// HD tactical presentation uses the same opaque black background as unexplored
+	// Battlescape space. This removes TFTD's historical blue loading/turn backdrop
+	// around the briefing window. Classic/non-HD rendering keeps the ruleset colour.
 	int bgColor = 15;
 	auto* sc = _battleGame->getEnviroEffects();
 	if (sc)
 	{
 		bgColor = sc->getMapBackgroundColor();
 	}
-	_bg->drawRect(&rect, Palette::blockOffset(0) + bgColor);
+	const Uint8 finalBgColor = Options::hdGraphics
+		? hdOpaqueBlackPaletteIndex(_bg->getPalette())
+		: (Uint8)(Palette::blockOffset(0) + bgColor);
+	_bg->drawRect(&rect, finalBgColor);
+	if (Options::hdGraphics)
+	{
+		HdUiPicture picture(_bg->getWidth(), _bg->getHeight());
+		picture.fill(picture.bounds(), finalBgColor);
+		_bg->setHdPicture(picture);
+	}
 	// make this screen line up with the hidden movement screen
 	_window->setY(y);
 	_txtMessageReinforcements->setY(y + 8);
@@ -531,7 +564,8 @@ void NextTurnState::close()
 
 	// not "escort the VIPs" missions, not the final mission and all aliens dead.
 	const bool killingAllAliensIsNotEnough = _battleGame->getObjectiveType() == MUST_DESTROY || (_battleGame->getVIPSurvivalPercentage() > 0 && _battleGame->getVIPEscapeType() != ESCAPE_NONE);
-	const bool enemiesDefeated = neutralizationLatched || tally.liveAliens == 0;
+	const bool testEmptyHostileSandbox = _battleGame->isTestEmptyHostileSandbox();
+	const bool enemiesDefeated = !testEmptyHostileSandbox && (neutralizationLatched || tally.liveAliens == 0);
 	const bool finishNow = (!killingAllAliensIsNotEnough && enemiesDefeated) || tally.liveSoldiers == 0;
 
 	if (finishNow)

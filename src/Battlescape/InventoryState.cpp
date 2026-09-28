@@ -33,6 +33,10 @@
 #include "../Engine/Screen.h"
 #include "../Engine/Palette.h"
 #include "../Engine/Surface.h"
+#include "../Engine/HdUiPicture.h"
+#include "../Engine/HdImage.h"
+#include "../Engine/Exception.h"
+#include "../Savegame/BattleItem.h"
 #include "../Engine/Collections.h"
 #include "../Interface/Text.h"
 #include "../Interface/TextEdit.h"
@@ -69,6 +73,66 @@ static const int _templateBtnX = 288;
 static const int _createTemplateBtnY = 90;
 static const int _applyTemplateBtnY  = 113;
 
+// Explicit inventory bindings. These describe resource identities and layout;
+// they never copy a native raster into the HD scene.
+static void bindInventoryPicture(Surface *target, const std::string &identity)
+{
+	if (!Options::hdGraphics) return;
+	HdUiPicture picture(target->getWidth(), target->getHeight());
+	picture.image(hdUiScreenDefinition(identity, target->getWidth(), target->getHeight()),
+		picture.bounds(), picture.bounds());
+	target->setHdPicture(picture);
+}
+
+static void clearInventoryPicture(Surface *target)
+{
+	if (Options::hdGraphics)
+		target->setHdPicture(HdUiPicture(target->getWidth(), target->getHeight()));
+	target->clear();
+}
+
+static void bindInventoryPortrait(Surface *target, HdImageCache &images, const BattleUnit *unit, const Soldier *soldier)
+{
+	HdUiPicture picture(320, 200);
+	if (soldier && soldier->getArmor()->hasLayersDefinition())
+	{
+		for (const auto &layer : soldier->getArmorLayers())
+			picture.image(hdUiScreenDefinition(layer, 320, 200), picture.bounds(), picture.bounds());
+	}
+	else
+	{
+		const auto &look = (soldier ? soldier->getArmor() : unit->getArmor())->getSpriteInventory();
+		// Empty spriteInv means no portrait by design, not a missing asset.
+		if (!look.empty())
+		{
+			std::vector<std::string> identities;
+			if (soldier)
+			{
+				const std::string gender = soldier->getGender() == GENDER_MALE ? "M" : "F";
+				for (int i = 0; i <= RuleSoldier::LookVariantBits; ++i)
+					identities.push_back(look + gender + std::to_string(int(soldier->getLook()) +
+						(soldier->getLookVariant() & (RuleSoldier::LookVariantMask >> i)) * 4) + ".SPK");
+				identities.push_back(look + ".SPK");
+				identities.push_back(look);
+			}
+			else identities = {look, look + ".SPK", look + "M0.SPK"};
+			bool found = false;
+			for (const auto &identity : identities)
+			{
+				const auto definition = hdUiScreenDefinition(identity, 320, 200);
+				const auto resolved = images.resolve(definition.key, definition.candidates, false);
+				if (resolved.failure == HdAssetFailure::Missing) continue;
+				if (!resolved) throw Exception("[HD INVENTORY ERROR] Invalid portrait PNG: " + identity);
+				picture.image(definition, picture.bounds(), picture.bounds());
+				found = true;
+				break;
+			}
+			if (!found) throw Exception("[HD INVENTORY ERROR] Missing portrait PNG for: " + look);
+		}
+	}
+	target->setHdPicture(picture);
+}
+
 /**
  * Initializes all the elements in the Inventory screen.
  * @param game Pointer to the core game.
@@ -94,20 +158,16 @@ InventoryState::InventoryState(bool tu, BattlescapeState *parent, Base *base, bo
 		}
 	}
 
-	if (Options::maximizeInfoScreens)
-	{
-		Options::baseXResolution = Screen::ORIGINAL_WIDTH;
-		Options::baseYResolution = Screen::ORIGINAL_HEIGHT;
-		_game->getScreen()->resetDisplay(false);
-	}
-	else if (_battleGame->isBaseCraftInventory())
-	{
-		Screen::updateScale(Options::battlescapeScale, Options::baseXBattlescape, Options::baseYBattlescape, true);
-		_game->getScreen()->resetDisplay(false);
-	}
-
-	// Independent HD presentation scale for Aquanaut/inventory screens.
+	// AQUANAUT_UI_FAMILY_V1: Inventory owns a fixed 320x200 logical UI space.
+	// Opening it must never mutate the active World base resolution or reset
+	// the physical display. aquanautUiScale is retained as a family-local
+	// content scale, exactly like minimapScale in V1-C1.
+	setUiFamily(UiFamily::Aquanaut);
 	setPresentationScale(Options::getAquanautUiScale());
+	Log(LOG_INFO) << "[AQUANAUT-UI FAMILY V1][ASSIGN] state=InventoryState family=Aquanaut"
+		<< " contentScale=" << Options::getAquanautUiScale()
+		<< " baseCraft=" << (_battleGame->isBaseCraftInventory() ? 1 : 0)
+		<< " tuMode=" << (_tu ? 1 : 0);
 
 	// Create objects
 	_bg = new Surface(320, 200, 0, 0);
@@ -142,6 +202,8 @@ InventoryState::InventoryState(bool tu, BattlescapeState *parent, Base *base, bo
 		_btnLinks = new BattlescapeButton(23, 22, 213, 1);
 	}
 	_selAmmo = new Surface(RuleInventory::HAND_W * RuleInventory::SLOT_W, RuleInventory::HAND_H * RuleInventory::SLOT_H, 272, 88);
+	clearInventoryPicture(_selAmmo);
+	clearInventoryPicture(_soldier);
 	_inv = new Inventory(_game, 320, 200, 0, 0, _parent == 0);
 	_btnQuickSearch = new TextEdit(this, 40, 9, 244, 140);
 
@@ -151,6 +213,7 @@ InventoryState::InventoryState(bool tu, BattlescapeState *parent, Base *base, bo
 	add(_bg); registerHdSurface(_bg, "background", "inventory");
 
 	// Set up objects
+	bindInventoryPicture(_bg, "TAC01.SCR");
 	_game->getMod()->getSurface("TAC01.SCR")->blitNShade(_bg, 0, 0);
 	add(_btnArmor, "buttonArmor", "inventory", _bg);
 
@@ -309,6 +372,7 @@ InventoryState::InventoryState(bool tu, BattlescapeState *parent, Base *base, bo
 
 	_btnOk->onKeyboardRelease((ActionHandler)&InventoryState::btnQuickSearchToggle, Options::keyToggleQuickSearch);
 
+	bindInventoryPicture(_btnLinks, "oxceLinksInv");
 	_game->getMod()->getSurface("oxceLinksInv")->blitNShade(_btnLinks, 0, 0);
 	_btnLinks->initSurfaces();
 	_btnLinks->setVisible(Options::oxceLinks);
@@ -348,6 +412,10 @@ InventoryState::InventoryState(bool tu, BattlescapeState *parent, Base *base, bo
 	_txtStatLine2->setVisible(Options::showMoreStatsInInventoryView && !_tu);
 	_txtStatLine3->setVisible(Options::showMoreStatsInInventoryView && !_tu);
 	_txtStatLine4->setVisible(Options::showMoreStatsInInventoryView && !_tu);
+
+	// MISSION_RESOURCE_PREWARM_V2: InventoryState owns a separate HD UI cache
+	// from BattlescapeState. Warm its registered overrides before its first blit.
+	prewarmHdUiResources();
 }
 
 static void _clearInventoryTemplate(std::vector<EquipmentLayoutItem*> &inventoryTemplate)
@@ -365,11 +433,8 @@ InventoryState::~InventoryState()
 
 	if (!_battleGame->isBaseCraftInventory())
 	{
-		if (Options::maximizeInfoScreens)
-		{
-			Screen::updateScale(Options::battlescapeScale, Options::baseXBattlescape, Options::baseYBattlescape, true);
-			_game->getScreen()->resetDisplay(false);
-		}
+		// AQUANAUT_UI_FAMILY_V1: no scale/display restoration is necessary.
+		// The underlying Battlescape never left its World Space.
 
 		//fix case when scripts could kill unit before inventory is closed
 		if (BattleUnit* unit =_battleGame->getSelectedUnit())
@@ -382,8 +447,8 @@ InventoryState::~InventoryState()
 	}
 	else
 	{
-		Screen::updateScale(Options::geoscapeScale, Options::baseXGeoscape, Options::baseYGeoscape, true);
-		_game->getScreen()->resetDisplay(false);
+		// Base/craft inventory overlays the Strategic state without changing its
+		// World canvas, so closing it likewise requires no display reset.
 	}
 }
 
@@ -434,8 +499,8 @@ void InventoryState::init()
 		}
 	}
 
-	_soldier->clear();
-	_btnRank->clear();
+	clearInventoryPicture(_soldier);
+	clearInventoryPicture(_btnRank);
 
 	if (Options::oxceInventoryShowUnitSlot)
 	{
@@ -513,6 +578,16 @@ void InventoryState::init()
 			_reloadUnit = false;
 		}
 
+		if (Options::hdGraphics)
+		{
+			HdUiPicture rank(_btnRank->getWidth(), _btnRank->getHeight());
+			rank.image(hdUiFrameDefinition("SMOKE.PCK", s->getRankSpriteBattlescape(), 32, 40),
+				{0, 0, 32, 40}, {0, 0, 32, 40});
+			_btnRank->setHdPicture(rank);
+			bindInventoryPortrait(_soldier, _game->getScreen()->getHdCanvasImages(), unit, s);
+		}
+		else
+		{
 		SurfaceSet *texture = _game->getMod()->getSurfaceSet("SMOKE.PCK");
 		auto* frame = texture->getFrame(s->getRankSpriteBattlescape());
 		if (frame)
@@ -577,9 +652,14 @@ void InventoryState::init()
 					<< s->getArmor()->getType() << "; inventory kept usable.";
 			}
 		}
+		}
 	}
 	else
 	{
+		if (Options::hdGraphics)
+			bindInventoryPortrait(_soldier, _game->getScreen()->getHdCanvasImages(), unit, nullptr);
+		else
+		{
 		Surface *armorSurface = 0;
 		const std::string look = unit->getArmor()->getSpriteInventory();
 		if (!look.empty())
@@ -603,6 +683,7 @@ void InventoryState::init()
 			Log(LOG_INFO) << "[TFTD TRAINING] inventory paper-doll unavailable for Unit "
 				<< unit->getType() << " armor " << unit->getArmor()->getType()
 				<< "; inventory kept usable.";
+		}
 		}
 	}
 
@@ -1261,7 +1342,7 @@ void InventoryState::btnUnloadClick(Action *)
 	{
 		_txtItem->setText("");
 		_txtAmmo->setText("");
-		_selAmmo->clear();
+		clearInventoryPicture(_selAmmo);
 		updateStats();
 		_game->getMod()->getSoundByDepth(0, Mod::ITEM_DROP)->play();
 	}
@@ -2016,7 +2097,7 @@ void InventoryState::invMouseOver(Action *)
 			_txtItem->setText(itemName);
 		}
 
-		_selAmmo->clear();
+		clearInventoryPicture(_selAmmo);
 		bool hasSelfAmmo = item->getRules()->getBattleType() != BT_AMMO && item->getRules()->getClipSize() > 0;
 		if ((item->isWeaponWithAmmo() || hasSelfAmmo) && item->haveAnyAmmo())
 		{
@@ -2046,7 +2127,7 @@ void InventoryState::invMouseOver(Action *)
 			_txtItem->setText("");
 		}
 		_txtAmmo->setText("");
-		_selAmmo->clear();
+		clearInventoryPicture(_selAmmo);
 		updateTemplateButtons(!_tu);
 	}
 }
@@ -2059,7 +2140,7 @@ void InventoryState::invMouseOut(Action *)
 {
 	_txtItem->setText("");
 	_txtAmmo->setText("");
-	_selAmmo->clear();
+	clearInventoryPicture(_selAmmo);
 	_inv->setMouseOverItem(0);
 	_mouseHoverItem = nullptr;
 	_currentDamageTooltipItem = nullptr;
@@ -2233,6 +2314,23 @@ void InventoryState::think()
 		if (firstAmmo)
 		{
 			_txtAmmo->setText(tr("STR_AMMO_ROUNDS_LEFT").arg(firstAmmo->getAmmoQuantity()));
+			if (Options::hdGraphics)
+			{
+				HdUiPicture preview(_selAmmo->getWidth(), _selAmmo->getHeight());
+				preview.fill(preview.bounds(), _game->getMod()->getInterface("inventory")->getElement("grid")->color);
+				preview.fill({1, 1, double(_selAmmo->getWidth()-2), double(_selAmmo->getHeight()-2)}, Palette::blockOffset(0)+15);
+				const int frame = firstAmmo->getInventorySpriteFrame(_battleGame, anim);
+				if (frame != -1)
+				{
+					if (firstAmmo->hasInventoryPixelProgram())
+						throw Exception("[HD INVENTORY ERROR] Ammo pixel program requires an HD material adapter: " + firstAmmo->getRules()->getType());
+					preview.image(hdUiFrameDefinition("BIGOBS.PCK", frame, 32, 48), {0, 0, 32, 48},
+						{double(firstAmmo->getRules()->getHandSpriteOffX()), double(firstAmmo->getRules()->getHandSpriteOffY()), 32, 48});
+				}
+				_selAmmo->setHdPicture(preview);
+			}
+			else
+			{
 			SDL_Rect r;
 			r.x = 0;
 			r.y = 0;
@@ -2245,10 +2343,11 @@ void InventoryState::think()
 			r.h -= 2;
 			_selAmmo->drawRect(&r, Palette::blockOffset(0)+15);
 			firstAmmo->getRules()->drawHandSprite(_game->getMod()->getSurfaceSet("BIGOBS.PCK"), _selAmmo, firstAmmo, _game->getSavedGame()->getSavedBattle(), anim);
+			}
 		}
 		else
 		{
-			_selAmmo->clear();
+			clearInventoryPicture(_selAmmo);
 		}
 	}
 	State::think();
@@ -2385,14 +2484,18 @@ void InventoryState::updateTemplateButtons(bool isVisible)
 		if (_curInventoryTemplate.empty())
 		{
 			// use "empty template" icons
+			bindInventoryPicture(_btnCreateTemplate, "InvCopy");
 			_game->getMod()->getSurface("InvCopy")->blitNShade(_btnCreateTemplate, 0, 0);
+			bindInventoryPicture(_btnApplyTemplate, "InvPasteEmpty");
 			_game->getMod()->getSurface("InvPasteEmpty")->blitNShade(_btnApplyTemplate, 0, 0);
 			_btnApplyTemplate->setTooltip("STR_CLEAR_INVENTORY");
 		}
 		else
 		{
 			// use "active template" icons
+			bindInventoryPicture(_btnCreateTemplate, "InvCopyActive");
 			_game->getMod()->getSurface("InvCopyActive")->blitNShade(_btnCreateTemplate, 0, 0);
+			bindInventoryPicture(_btnApplyTemplate, "InvPaste");
 			_game->getMod()->getSurface("InvPaste")->blitNShade(_btnApplyTemplate, 0, 0);
 			_btnApplyTemplate->setTooltip("STR_APPLY_INVENTORY_TEMPLATE");
 		}
@@ -2401,8 +2504,8 @@ void InventoryState::updateTemplateButtons(bool isVisible)
 	}
 	else
 	{
-		_btnCreateTemplate->clear();
-		_btnApplyTemplate->clear();
+		clearInventoryPicture(_btnCreateTemplate);
+		clearInventoryPicture(_btnApplyTemplate);
 	}
 }
 

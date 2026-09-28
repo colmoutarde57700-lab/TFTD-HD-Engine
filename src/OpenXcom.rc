@@ -7,7 +7,7 @@
 // Manifest
 //
 
-CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "../res/windows/openxcom.manifest"
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "res/windows/openxcom.manifest"
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -53,7 +53,7 @@ END
 //
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
-IDI_ICON1               ICON                    "../res/windows/openxcom.ico"
+IDI_ICON1               ICON                    "res/windows/openxcom.ico"
 
 #ifdef EMBED_ASSETS
 

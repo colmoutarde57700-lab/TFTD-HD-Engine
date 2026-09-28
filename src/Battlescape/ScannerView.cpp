@@ -25,6 +25,7 @@
 #include "../Savegame/Tile.h"
 #include "../Savegame/SavedGame.h"
 #include "../Savegame/SavedBattleGame.h"
+#include "../Engine/HdUiImage.h"
 
 namespace OpenXcom
 {
@@ -40,20 +41,19 @@ namespace OpenXcom
  */
 ScannerView::ScannerView (int w, int h, int x, int y, Game * game, BattleUnit *unit) : InteractiveSurface(w, h, x, y), _game(game), _unit(unit), _frame(0)
 {
+	refreshContacts();
 	_redraw = true;
 }
 
 /**
  * Draws the ScannerView view.
  */
-void ScannerView::draw()
+void ScannerView::refreshContacts()
 {
-	SurfaceSet *set = _game->getMod()->getSurfaceSet("DETBLOB.DAT");
-	Surface *surface = 0;
-
-	clear();
-
-	this->lock();
+	// Scanning is a game operation, not a side effect of either renderer.
+	// Both presentations consume the same contact snapshot afterwards.
+	_contacts.clear();
+	_direction = _unit->getDirection();
 	for (int x = -9; x < 10; x++)
 	{
 		for (int y = -9; y < 10; y++)
@@ -68,21 +68,40 @@ void ScannerView::draw()
 					{
 						t->getUnit()->setScannedTurn(_game->getSavedGame()->getSavedBattle()->getTurn());
 						if (frame > 5) frame = 5;
-						surface = set->getFrame(frame + _frame);
-						surface->blitNShade(this, ((9+x)*8)-4, ((9+y)*8)-4, 0);
+						_contacts.push_back({((9+x)*8)-4, ((9+y)*8)-4, frame});
 					}
 				}
 			}
 		}
 	}
 
-	// the arrow of the direction the unit is pointed
-	surface = set->getFrame(7 + _unit->getDirection());
+}
 
-	surface->blitNShade(this, (9*8)-4, (9*8)-4, 0);
-	this->unlock();
+void ScannerView::draw()
+{
+	SurfaceSet *set = _game->getMod()->getSurfaceSet("DETBLOB.DAT");
+	clear();
+	lock();
+	for (const auto &contact : _contacts)
+		set->getFrame(contact.strength + _frame)->blitNShade(this, contact.x, contact.y, 0);
+	set->getFrame(7 + _direction)->blitNShade(this, 68, 68, 0);
+	unlock();
+}
 
-
+void ScannerView::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas content(getWidth(), getHeight());
+	auto palette = std::make_shared<std::array<HdRgba, 256>>();
+	for (size_t i = 0; i < palette->size(); ++i) (*palette)[i] = getHdColor(static_cast<Uint8>(i));
+	const auto append = [&](int frame, int x, int y)
+	{
+		hdAppendUiImage(content, images, hdUiFrameDefinition("DETBLOB.DAT", frame, 16, 16),
+			{0, 0, 16, 16}, {double(x), double(y), 16, 16}, palette);
+	};
+	for (const auto &contact : _contacts) append(contact.strength + _frame, contact.x, contact.y);
+	append(7 + _direction, 68, 68);
+	composeHdLayer(canvas, content);
 }
 
 /**
@@ -99,6 +118,7 @@ void ScannerView::mouseClick (Action *, State *)
  */
 void ScannerView::animate()
 {
+	refreshContacts();
 	_frame++;
 	if (_frame > 1)
 	{

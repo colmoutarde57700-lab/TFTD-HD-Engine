@@ -18,6 +18,8 @@
  */
 #include "BattlescapeButton.h"
 #include "../Engine/Action.h"
+#include "../Engine/HdUiPicture.h"
+#include "../Engine/Exception.h"
 
 namespace OpenXcom
 {
@@ -145,6 +147,9 @@ void BattlescapeButton::allowClickInversion()
  */
 void BattlescapeButton::initSurfaces(Surface* custom)
 {
+	_hdCustomPressed = custom != nullptr;
+	_hdPressedPicture.reset();
+	if (custom && custom->hasHdPicture()) setHdPressedPicture(custom->getHdPicture());
 	delete _altSurface;
 	_altSurface = new Surface(_surface->w, _surface->h, _x, _y);
 	_altSurface->setPalette(getPalette());
@@ -204,6 +209,33 @@ void BattlescapeButton::initSurfaces(Surface* custom)
  * depending on whether the button is "pressed" or not.
  * @param surface Pointer to surface to blit onto.
  */
+void BattlescapeButton::setHdPressedPicture(const HdUiPicture &picture)
+{
+	_hdPressedPicture = std::make_shared<const HdUiPicture>(picture);
+	_hdCustomPressed = true;
+}
+
+void BattlescapeButton::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas content(getWidth(), getHeight());
+	if (_inverted && _hdCustomPressed)
+	{
+		if (!_hdPressedPicture)
+			throw Exception("[HD UI ERROR] Custom pressed button has no HD picture binding");
+		auto palette = std::make_shared<std::array<HdRgba, 256>>();
+		for (size_t i = 0; i < palette->size(); ++i) (*palette)[i] = getHdColor(static_cast<Uint8>(i));
+		_hdPressedPicture->compose(content, images, palette);
+	}
+	else
+	{
+		const auto style = !_inverted ? hdUiIdentityPalette() : _tftdMode ?
+			hdUiTftdPressedPalette() : hdUiInvertPalette(static_cast<Uint8>(_color + 3));
+		composeHdBackdrop(content, images, content.bounds(), content.bounds(), style);
+	}
+	composeHdLayer(canvas, content);
+}
+
 void BattlescapeButton::blit(SDL_Surface *surface)
 {
 	if (_inverted)
@@ -215,6 +247,15 @@ void BattlescapeButton::blit(SDL_Surface *surface)
 	{
 		Surface::blit(surface);
 	}
+}
+
+SDL_Surface *BattlescapeButton::getPresentationSurface()
+{
+	if (_inverted && _altSurface)
+	{
+		return _altSurface->getPresentationSurface();
+	}
+	return Surface::getPresentationSurface();
 }
 
 /**

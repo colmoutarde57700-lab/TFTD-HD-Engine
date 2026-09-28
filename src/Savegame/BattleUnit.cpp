@@ -20,6 +20,9 @@
 #include "BattleItem.h"
 #include <sstream>
 #include <algorithm>
+#include <map>
+#include <iomanip>
+#include <cmath>
 #include "../Engine/Collections.h"
 #include "../Engine/Surface.h"
 #include "../Engine/Script.h"
@@ -27,12 +30,14 @@
 #include "../Engine/Language.h"
 #include "../Engine/Exception.h"
 #include "../Engine/Options.h"
+#include "../Engine/Logger.h"
 #include "../Engine/RNG.h"
 #include "../Battlescape/Pathfinding.h"
 #include "../Battlescape/BattlescapeGame.h"
 #include "../Battlescape/AIModule.h"
 #include "../Battlescape/Inventory.h"
 #include "../Battlescape/TileEngine.h"
+#include "../Battlescape/RealHdPerceptionAuthority.h"
 #include "../Battlescape/ExplosionBState.h"
 #include "../Mod/Mod.h"
 #include "../Mod/Armor.h"
@@ -5035,6 +5040,37 @@ void BattleUnit::deriveNeutralRank()
 */
 bool BattleUnit::checkViewSector (Position pos, bool useTurretDirection /* = false */) const
 {
+	// REAL HD FOV ARMOR V1. Only living player units in REAL HD take the
+	// equipment-driven sector. REAL HD OFF, aliens, neutrals and every unknown
+	// compatibility case execute the exact historical OXCE code below.
+	if (RealHdPerceptionAuthority::enabledFor(this))
+	{
+		const float angle = RealHdPerceptionAuthority::angleDeg(this, pos, useTurretDirection);
+		const float half = RealHdPerceptionAuthority::halfAngleDeg(this);
+		const bool inside = angle <= half + 0.0001f;
+		#ifdef REAL_HD_DEEP_DIAGNOSTICS
+		if (Options::hdFovAuditProbeEnabled)
+		{
+			std::ostringstream key, signature;
+			key << getId() << ':' << pos.x << ',' << pos.y << ',' << pos.z;
+			signature << getPosition() << ':' << getDirection() << ':' << useTurretDirection
+				<< ':' << (int)std::lround(angle * 10.0f) << ':' << (inside ? 1 : 0);
+			static std::map<std::string, std::string> last;
+			if (last[key.str()] != signature.str())
+			{
+				last[key.str()] = signature.str();
+				Log(LOG_INFO) << "[REAL HD FOV SECTOR AUDIT V2] observer=" << getId()
+					<< " armor=" << (getArmor() ? getArmor()->getType() : std::string("<none>"))
+					<< " targetPos=" << pos
+					<< " angleDeg=" << std::fixed << std::setprecision(1) << angle
+					<< " fovHalfDeg=" << half
+					<< " sector=" << (inside ? "PASS" : "FAIL");
+			}
+		}
+		#endif
+		return inside;
+	}
+
 	int unitSize = getArmor()->getSize();
 	//Check view cone from each of the unit's tiles
 	for (int x = 0; x < unitSize; ++x)

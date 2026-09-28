@@ -28,6 +28,10 @@
 #include "../lodepng.h"
 #include "Palette.h"
 #include "Exception.h"
+#include "HdCanvas.h"
+#include "HdUiImage.h"
+#include "HdUiPicture.h"
+#include <typeinfo>
 #include "Logger.h"
 #include "SDL2Helpers.h"
 #include "FileMap.h"
@@ -685,6 +689,84 @@ void Surface::think()
 
 }
 
+void Surface::setHdPicture(const HdUiPicture &picture)
+{
+	_hdPicture = std::make_shared<const HdUiPicture>(picture);
+}
+
+HdUiPicture Surface::getHdPicture() const
+{
+	if (_hdPicture) return *_hdPicture;
+	if (_hdResourceId.empty())
+		throw Exception("[HD UI ERROR] Surface has no explicit HD picture binding");
+	HdUiPicture picture(getWidth(), getHeight());
+	picture.image(hdUiScreenDefinition(_hdResourceId, getWidth(), getHeight(), _hdUiManaLayout),
+		picture.bounds(), picture.bounds());
+	return picture;
+}
+
+void Surface::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	if (!_hdNativeFallbackReason.empty()) throw Exception("[HD COMPATIBILITY] " + _hdNativeFallbackReason);
+	if (hasHdPicture())
+	{
+		HdCanvas content(getWidth(), getHeight());
+		composeHdBackdrop(content, images, content.bounds(), content.bounds(), hdUiIdentityPalette());
+		composeHdLayer(canvas, content);
+		return;
+	}
+
+	// Diagnostic V2: a plain Surface/InteractiveSurface is often only an input
+	// hitbox. If its native 8-bit buffer contains no visible pixels, falling back
+	// to the native raster draws nothing and should not be reported as a graphical
+	// Legacy dependency. Consume it as an input-only surface instead.
+	bool anyNativePixel = false;
+	if (_surface && _surface->pixels && _surface->format && _surface->format->BytesPerPixel == 1)
+	{
+		const Uint8 *pixels = static_cast<const Uint8*>(_surface->pixels);
+		for (int y = 0; y < _surface->h && !anyNativePixel; ++y)
+		{
+			const Uint8 *row = pixels + (size_t)y * _surface->pitch;
+			for (int x = 0; x < _surface->w; ++x)
+			{
+				if (row[x] != 0) { anyNativePixel = true; break; }
+			}
+		}
+	}
+	if (!anyNativePixel) return;
+
+	throw Exception(std::string("[HD WIDGET ERROR] No HD command producer for visible native pixels in ") + typeid(*this).name() +
+		" at " + std::to_string(getX()) + "," + std::to_string(getY()));
+}
+
+void Surface::composeHdBackdrop(HdCanvas &canvas, HdImageCache &images,
+	HdRect source, HdRect destination, const HdUiIndexMap &paletteMap) const
+{
+	auto palette = std::make_shared<std::array<HdRgba, 256>>();
+	for (size_t i = 0; i < palette->size(); ++i) (*palette)[i] = getHdColor(paletteMap[i]);
+	if (!source.finite() || !destination.finite() || source.w < 0 || source.h < 0 ||
+		destination.w < 0 || destination.h < 0)
+		throw Exception("[HD UI ERROR] Invalid picture backdrop crop");
+	if (source.empty() || destination.empty()) return;
+	HdCanvas region(source.w, source.h);
+	region.composite(getHdPicture().makeCanvas(images, palette), {-source.x, -source.y, 1, 1});
+	canvas.composite(region, {destination.x, destination.y, destination.w / source.w, destination.h / source.h});
+}
+
+HdRgba Surface::getHdColor(Uint8 index) const
+{
+	const SDL_Color color = getPalette()[index];
+	return {color.r, color.g, color.b, static_cast<Uint8>(index ? 255 : 0)};
+}
+
+void Surface::composeHdLayer(HdCanvas &target, const HdCanvas &layer) const
+{
+	if (isDisplayVisible())
+		target.composite(layer, {double(getDisplayX()), double(getDisplayY()),
+			double(getDisplayScale()), double(getDisplayScale())}, double(getDisplayAlpha()) / 255.0);
+}
+
 /**
  * Draws the graphic that the surface contains before it
  * gets blitted onto other surfaces. The surface is only
@@ -695,6 +777,15 @@ void Surface::draw()
 {
 	_redraw = false;
 	clear();
+}
+
+SDL_Surface *Surface::getPresentationSurface()
+{
+	if (_redraw)
+	{
+		draw();
+	}
+	return _surface.get();
 }
 
 /**

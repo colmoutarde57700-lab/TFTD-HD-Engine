@@ -74,6 +74,7 @@ public:
 	int getValue() const;
 	/// Blits the slider onto another surface.
 	void blit(SDL_Surface *surface) override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Moves the slider.
 	void handle(Action *action, State *state) override;
 	/// Special handling for mouse presses.

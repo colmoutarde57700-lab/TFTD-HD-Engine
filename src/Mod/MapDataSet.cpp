@@ -168,7 +168,7 @@ void MapDataSet::loadData(MCDPatch *patch, bool validate)
 
 	while (mapFile->read((char*)&mcd, sizeof(MCD)))
 	{
-		MapData *to = new MapData(this);
+		MapData *to = new MapData(this, objNumber);
 		_objects.push_back(to);
 
 		// set all the terrain object properties:

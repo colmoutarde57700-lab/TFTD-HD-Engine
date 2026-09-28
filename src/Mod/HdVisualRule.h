@@ -83,12 +83,15 @@ struct HdVisualLayer
 	// RC12 P8 colour policy:
 	// auto            = environment, regardless of PNG storage format
 	// indexedLegacy   = explicit historical TFTD palette/index semantics
-	// environment/rgba = authored RGB/RGBA world art + dynamic mission/depth grading
+	// environment/rgba = authored RGB/RGBA world art + modern semantic HD material grade
 	// fixed/native     = explicit opt-out; authored colour is final apart from ordinary local shade
 	//
 	// IMPORTANT: a PNG using an internal 8-bit palette is NOT automatically
 	// Legacy. File encoding and renderer colour semantics are independent.
 	std::string colorMode = "auto";
+	// Modern true-colour material profile used by the HD renderer. Optional.
+	// Examples: terrain, organic, rock, wreck, craft_exterior, craft_interior, unit, effect.
+	std::string materialProfile;
 	int offsetX = 0;
 	int offsetY = 0;
 	bool randomPhase = false;
@@ -102,6 +105,7 @@ struct HdVisualLayer
 		reader.tryRead("initialState", initialState);
 		reader.tryRead("nativeScale", nativeScale);
 		reader.tryRead("colorMode", colorMode);
+		reader.tryRead("materialProfile", materialProfile);
 		reader.tryRead("offsetX", offsetX);
 		reader.tryRead("offsetY", offsetY);
 		reader.tryRead("randomPhase", randomPhase);

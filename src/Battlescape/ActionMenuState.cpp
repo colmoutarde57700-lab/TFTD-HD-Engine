@@ -21,6 +21,7 @@
 #include "../Engine/Options.h"
 #include "../Engine/LocalizedText.h"
 #include "../Engine/Action.h"
+#include "../Engine/Logger.h"
 #include "../Engine/Unicode.h"
 #include "../Savegame/BattleUnit.h"
 #include "../Savegame/BattleItem.h"
@@ -47,6 +48,9 @@ namespace OpenXcom
  */
 ActionMenuState::ActionMenuState(BattleAction *action) : _action(action)
 {
+	// BATTLE_UI_FAMILY_V1-C2: action popups are tactical UI, not World-space
+	// surfaces. SkillMenuState uses this constructor too.
+	setUiFamily(UiFamily::Battlescape);
 }
 
 /**
@@ -59,23 +63,26 @@ ActionMenuState::ActionMenuState(BattleAction *action) : _action(action)
 ActionMenuState::ActionMenuState(BattleAction *action, int x, int y) : _action(action)
 {
 	_screen = false;
+	// BATTLE_UI_FAMILY_V1-C2: x/y are now canonical Battlescape-UI
+	// coordinates supplied by BattlescapeState, never World/display coords.
+	setUiFamily(UiFamily::Battlescape);
 
 	// Set palette
 	_game->getSavedGame()->getSavedBattle()->setPaletteByDepth(this);
 
-	const int hdUiScale = Options::getBattleUiScale();
 	for (int i = 0; i < 6; ++i)
 	{
 		_actionMenu[i] = new ActionMenuItem(i, _game, x, y);
 		add(_actionMenu[i]);
-		// ActionMenuState is a non-fullscreen overlay and does not call
-		// setInterface(), so it never inherited battleUiScale. Scale around the
-		// popup's own origin instead of the screen centre to keep left/right-hand
-		// menus attached to the corresponding HUD button.
-		_actionMenu[i]->setDisplayScale(hdUiScale, x, y);
+		// UiFamily::Battlescape owns presentation and input scaling. Do not
+		// stack the historical displayScale/world transform on this popup.
 		_actionMenu[i]->setVisible(false);
 		_actionMenu[i]->onMouseClick((ActionHandler)&ActionMenuState::btnActionMenuItemClick);
 	}
+
+	Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-C2][ACTION-MENU] family=Battlescape"
+		<< " anchorUi=" << x << "," << y
+		<< " contentScale=" << getPresentationScale();
 
 	// Build up the popup menu
 	int id = 0;

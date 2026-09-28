@@ -701,10 +701,25 @@ void NewBattleState::btnOkClick(Action *)
 	SavedBattleGame *bgame = new SavedBattleGame(_game->getMod(), _game->getLanguage());
 	_game->getSavedGame()->setBattleGame(bgame);
 	bgame->setMissionType(_missionTypes[_cbxMission->getSelected()]);
+	const std::string &selectedTerrainType = _terrainTypes[_cbxTerrain->getSelected()];
+	const bool bedrockTestTerrain =
+		selectedTerrainType == "HD_SAND_COMPOSITE_TEST"
+		|| selectedTerrainType == "HD_CORAL_BEDROCK_TEST"
+		|| selectedTerrainType == "HD_SEABED_BEDROCK_TEST";
+	const bool testEmptyHostileSandbox = bedrockTestTerrain;
+	bgame->setTestEmptyHostileSandbox(testEmptyHostileSandbox);
+	// BEDROCK presentation is no longer armed by a test-terrain name. The actual
+	// RuleTerrain selected/loaded by BattlescapeGenerator owns semantic activation.
+	bgame->setBedrockRenderMaterial("");
+	if (testEmptyHostileSandbox)
+	{
+		Log(LOG_INFO) << "[TEST-SANDBOX ZERO-ALIEN V1][ARM] terrain=" << selectedTerrainType
+			<< " mission=" << bgame->getMissionType();
+	}
 	BattlescapeGenerator bgen = BattlescapeGenerator(_game);
 	Base *base = 0;
 
-	bgen.setTerrain(_game->getMod()->getTerrain(_terrainTypes[_cbxTerrain->getSelected()]));
+	bgen.setTerrain(_game->getMod()->getTerrain(selectedTerrainType));
 
 	if (_globeTextureVisible)
 	{

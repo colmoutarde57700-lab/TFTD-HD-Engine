@@ -23,6 +23,7 @@
  * Based on http://www.libsdl.org/projects/flxplay/
  */
 #include <SDL.h>
+#include <string>
 
 namespace OpenXcom
 {
@@ -68,7 +69,8 @@ private:
 	int _offset;
 	int _playingState;
 	bool _hasAudio, _useInternalAudio;
-	bool _forcedLegacy8Bit;
+	bool _hdPlayback;
+	std::string _hdFamily;
 	int _videoDelay;
 	double _volume;
 
@@ -108,6 +110,9 @@ private:
 	bool shouldQuit();
 
 	void playVideoFrame();
+	void playHdVideoFrame();
+	void decodeNativeVideoChunks();
+	void reconstructNativeVideo();
 	void color256();
 	void fliBRun();
 	void fliCopy();

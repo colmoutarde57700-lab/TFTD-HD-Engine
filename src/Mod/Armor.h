@@ -103,6 +103,8 @@ private:
 	std::string _fullBodySprite;
 	std::string _fullBodySpriteRoot;
 	std::string _hdUnitPartsRoot;
+	std::string _hdUnit3DModel;
+	int _hdUnit3DHeight = 24;
 	int _hdUnitPartsScale = 16;
 	std::string _requiresName;
 	std::string _requiresAwardName;
@@ -225,6 +227,8 @@ public:
 	/// Gets the unit's inventory sprite.
 	std::string getSpriteInventory() const;
 	/// Returns true if this armor declares a complete RGBA Battlescape sprite.
+	const std::string &getHdUnit3DModel() const { return _hdUnit3DModel; }
+	int getHdUnit3DHeight() const { return _hdUnit3DHeight; }
 	const std::string &getHdUnitPartsRoot() const { return _hdUnitPartsRoot; }
 	int getHdUnitPartsScale() const { return _hdUnitPartsScale; }
 	bool hasFullBodySprite() const { return !_fullBodySprite.empty(); }

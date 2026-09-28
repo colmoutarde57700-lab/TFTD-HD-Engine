@@ -40,6 +40,22 @@ class Sound;
 enum SoldierGender : char;
 
 /**
+ * Explicit UI presentation family.
+ *
+ * Battlescape owns the tactical HUD/menus. AQUANAUT_UI_FAMILY_V1 additionally
+ * activates a fixed 320x200 Inventory/Aquanaut presentation space whose
+ * independent aquanautUiScale is a family-local content scale.
+ */
+enum class UiFamily : unsigned char
+{
+	Legacy,
+	Global,
+	Battlescape,
+	Geoscape,
+	Aquanaut
+};
+
+/**
  * A game state that receives user input and reacts accordingly.
  * Game states typically represent a whole window or screen that
  * the user interacts with, making the game... well, interactive.
@@ -65,6 +81,13 @@ protected:
 	SDL_Color _palette[256];
 	Uint8 _cursorColor;
 	int _presentationScale;
+	UiFamily _uiFamily;
+	bool _uiFamilyTraceLogged;
+	bool _uiFamilyCompositeLegacy;
+	SDL_Surface *_uiFamilyCompositeCanvas;
+	// PRESENTATION_SPACES_TRACE_V1: diagnostics only; records the ruleset category
+	// selected by setInterface() so state logs can be correlated without changing policy.
+	std::string _traceInterfaceCategory;
 	struct HdSurfaceMeta
 	{
 		std::string id;
@@ -87,14 +110,30 @@ protected:
 	bool blitSurfaceWithHdOverride(Surface *surface, SDL_Surface *destination);
 	bool blitSurfaceWithHdOverridePhysical(Surface *surface, SDL_Surface *destination, Screen *screen);
 	void registerHdSurface(Surface *surface, const std::string &id, const std::string &category);
+	void prewarmHdUiResources();
+	std::string resolveHdUiOverride(Surface *surface);
+	// UI reconnect: use HD providers, then an explicit native fallback on failure.
+	virtual bool hdUiMigrationEnabled() const { return true; }
+	bool hasFixedUiFamilyPresentation() const;
+	void refreshUiFamilyInputTransforms();
+	bool blitSurfaceInUiFamilyPhysical(Surface *surface, SDL_Surface *destination, Screen *screen);
+	bool blitUiFamilyCompositePhysical(SDL_Surface *destination, Screen *screen);
 public:
 	/// Creates a new state linked to a game.
 	State();
 	/// Cleans up the state.
 	virtual ~State();
 	/// Sets presentation-only scale for this state without changing logical layout.
+	/// For an explicit UiFamily this becomes a family-local content scale, never a World scale.
 	void setPresentationScale(int scale);
 	int getPresentationScale() const { return _presentationScale; }
+	/// Assigns an explicit presentation family to this State.
+	void setUiFamily(UiFamily family);
+	UiFamily getUiFamily() const { return _uiFamily; }
+	/// Gets the canonical logical canvas used by this UI family.
+	void getUiFamilyLogicalSize(int &width, int &height) const;
+	/// Uses the historical widget composition on a canonical family canvas, then presents that canvas through the fixed UI transform.
+	void setUiFamilyLegacyComposite(bool enabled) { _uiFamilyCompositeLegacy = enabled; }
 	/// Set interface rules.
 	void setInterface(const std::string &s, bool alterPal = false, SavedBattleGame *battleGame = 0);
 	/// Set window background.

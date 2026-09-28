@@ -19,6 +19,8 @@
 #include "MiniBaseView.h"
 #include <cmath>
 #include "../Engine/SurfaceSet.h"
+#include "../Engine/HdUiImage.h"
+#include "../Engine/Exception.h"
 #include "../Engine/Action.h"
 #include "../Savegame/Base.h"
 #include "../Savegame/BaseFacility.h"
@@ -146,6 +148,38 @@ void MiniBaseView::draw()
 			unlock();
 		}
 	}
+}
+
+void MiniBaseView::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	if (!_bases) throw Exception("[HD UI ERROR] Mini base view has no base list");
+	HdCanvas content(getWidth(), getHeight());
+	auto palette = std::make_shared<std::array<HdRgba, 256>>();
+	for (int i = 0; i < 256; ++i) (*palette)[i] = getHdColor(i);
+	(*palette)[0] = {0, 0, 0, 0};
+	for (size_t i = 0; i < MAX_BASES; ++i)
+	{
+		const double origin = double(i * (MINI_SIZE + 2));
+		if (i == _base) content.rectangle({origin, 0, MINI_SIZE + 2, MINI_SIZE + 2}, getHdColor(1));
+		hdAppendUiImage(content, images, hdUiFrameDefinition("BASEBITS.PCK", 41, 32, 40),
+			{0, 0, 32, 40}, {origin, 0, 32, 40}, palette);
+		if (i >= _bases->size()) continue;
+		for (const auto *facility : *_bases->at(i)->getFacilities())
+		{
+			const int color = facility->getDisabled() ? _blue : facility->getBuildTime() == 0 ? _green : _red;
+			const double x = origin + 2 + facility->getX() * 2;
+			const double y = 2 + facility->getY() * 2;
+			const double width = facility->getRules()->getSizeX() * 2;
+			const double height = facility->getRules()->getSizeY() * 2;
+			content.rectangle({x, y, width, height}, getHdColor(color + 3));
+			content.rectangle({x + 1, y + 1, width - 1, height - 1}, getHdColor(color + 5));
+			content.rectangle({x, y, width - 1, height - 1}, getHdColor(color + 2));
+			content.rectangle({x + 1, y + 1, width - 2, height - 2}, getHdColor(color + 3));
+			content.rectangle({x, y, 1, 1}, getHdColor(color + 1));
+		}
+	}
+	composeHdLayer(canvas, content);
 }
 
 /**

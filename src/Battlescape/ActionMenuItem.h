@@ -62,6 +62,7 @@ public:
 	void setPalette(const SDL_Color *colors, int firstcolor, int ncolors) override;
 	/// Redraws it.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Processes a mouse hover in event.
 	void mouseIn(Action *action, State *state) override;
 	/// Processes a mouse hover out event.

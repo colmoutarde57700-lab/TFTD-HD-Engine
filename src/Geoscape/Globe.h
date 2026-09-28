@@ -151,6 +151,10 @@ public:
 	bool zoomDogfightOut();
 	/// Gets the current zoom.
 	size_t getZoom() const;
+	/// GEOSCAPE HD proof-of-life presentation accessors.
+	double getCenterLongitude() const { return _cenLon; }
+	double getCenterLatitude() const { return _cenLat; }
+	double getDisplayRadius() const { return _radius; }
 	/// Centers the globe on a point.
 	void center(double lon, double lat);
 	/// Checks if a point is inside land.

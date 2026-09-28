@@ -52,6 +52,7 @@ public:
 	void mouseRelease(Action *action, State *state) override;
 	/// Invert a button explicitly either ON or OFF.
 	void toggle(bool invert);
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 };
 
 }

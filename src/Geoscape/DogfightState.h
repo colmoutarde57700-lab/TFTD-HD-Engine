@@ -75,6 +75,9 @@ private:
 	bool _delayedRecolorDone;
 	// craft min/max, radar min/max, damage min/max, shield min/max
 	int _colors[13];
+	Uint8 _hdAmmoBaseColors[RuleCraft::WeaponMax]{};
+	void refreshHdWeapon(int slot, bool enabled);
+	void refreshHdPreview();
 	// Ends the dogfight.
 	void endDogfight();
 	bool _tractorLockedOn[RuleCraft::WeaponMax];

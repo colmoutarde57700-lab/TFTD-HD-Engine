@@ -39,6 +39,8 @@ protected:
 	bool _inverted;
 	InversionType _toggleMode;
 	Surface *_altSurface;
+	std::shared_ptr<const HdUiPicture> _hdPressedPicture;
+	bool _hdCustomPressed = false;
 public:
 	/// Creates a new image button with the specified size and position.
 	BattlescapeButton(int width, int height, int x = 0, int y = 0);
@@ -62,8 +64,12 @@ public:
 	void allowClickInversion();
 	/// Sets up the "pressed" surface.
 	void initSurfaces(Surface* custom = nullptr);
+	void setHdPressedPicture(const HdUiPicture &picture);
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Blits this surface onto another one.
 	void blit(SDL_Surface *surface) override;
+	/// Returns the currently visible normal/pressed pixels for direct presentation.
+	SDL_Surface *getPresentationSurface() override;
 	/// Alters both versions of the button's X pos.
 	void setX(int x) override;
 	/// Alters both versions of the button's Y pos.

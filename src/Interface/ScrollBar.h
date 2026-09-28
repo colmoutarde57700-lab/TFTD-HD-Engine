@@ -76,6 +76,7 @@ public:
 	void mouseRelease(Action *action, State *state) override;
 	/// Draws the scrollbar contents.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 };
 
 }

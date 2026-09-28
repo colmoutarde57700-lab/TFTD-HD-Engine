@@ -30,6 +30,8 @@
 #include "../Interface/ComboBox.h"
 #include "../Engine/Options.h"
 #include "../Engine/Action.h"
+#include "../Engine/HdGpuBackend.h"
+#include "../Engine/Logger.h"
 #include "StartState.h"
 
 namespace OpenXcom
@@ -494,6 +496,14 @@ void ModListState::btnOkClick(Action *)
 	Options::save();
 	if (Options::reload)
 	{
+		// TFTD HD / MOD RELOAD CACHE V1:
+		// Authored HD textures/material mip chains live in a process-global D3D11
+		// cache keyed by virtual asset path.  A mod enable/disable/reorder can make
+		// the same virtual path resolve to a different provider, while that GPU cache
+		// would otherwise keep the old provider's texture until process restart.
+		// Purge it on the main thread before StartState rebuilds FileMap + Mod.
+		HdGpuBackend::instance().clearHdImageCache();
+		Log(LOG_INFO) << "[HD MOD RELOAD CACHE V1] purged persistent GPU authored-image/material cache before mod provider reload";
 		_game->setState(new StartState);
 	}
 	else

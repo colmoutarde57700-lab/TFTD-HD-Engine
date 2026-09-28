@@ -22,6 +22,7 @@
 #include "../Interface/ProgressBar.h"
 #include "../Engine/Options.h"
 #include "../Engine/Palette.h"
+#include "../Engine/HdCanvas.h"
 
 namespace OpenXcom
 {
@@ -168,6 +169,28 @@ void BattlescapeMessage::blit(SDL_Surface *surface)
 	_text->blit(surface);
 	_txtThinking->blit(surface);
 	_progressBar->blit(surface);
+}
+
+void BattlescapeMessage::setDisplayScale(int scale, int anchorX, int anchorY)
+{
+	Surface::setDisplayScale(scale, anchorX, anchorY);
+	_window->setDisplayScale(scale, anchorX, anchorY);
+	_text->setDisplayScale(scale, anchorX, anchorY);
+	_txtThinking->setDisplayScale(scale, anchorX, anchorY);
+	_progressBar->setDisplayScale(scale, anchorX, anchorY);
+}
+
+void BattlescapeMessage::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	// Children carry absolute interface positions, like the original blit.
+	// Apply the parent's opacity to the assembled group exactly once.
+	HdCanvas group(canvas.bounds().w, canvas.bounds().h);
+	_window->composeHd(group, images);
+	_text->composeHd(group, images);
+	_txtThinking->composeHd(group, images);
+	_progressBar->composeHd(group, images);
+	canvas.composite(group, {}, double(getDisplayAlpha()) / 255.0);
 }
 
 /*

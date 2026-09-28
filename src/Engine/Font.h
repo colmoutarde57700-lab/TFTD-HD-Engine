@@ -25,6 +25,8 @@
 #include "Unicode.h"
 
 #include "Surface.h"
+#include "HdFont.h"
+#include "HdImage.h"
 
 namespace OpenXcom
 {
@@ -50,6 +52,8 @@ private:
 	std::vector<FontImage> _images;
 	std::unordered_map< UCode, std::pair<size_t, SDL_Rect> > _chars;
 	bool _monospace;
+	std::unordered_map<UCode, std::shared_ptr<HdFontFace>> _hdGlyphFaces;
+	mutable HdImageCache _hdGlyphImages;
 	/// Determines the size and position of each character in the font.
 	void init(size_t index, const UString &str);
 public:
@@ -75,6 +79,10 @@ public:
 	int getSpacing() const;
 	/// Gets the size of a particular character;
 	SDL_Rect getCharSize(UCode c) const;
+	/// Adds a glyph directly from the HD library to our interface scene.
+	double appendHdChar(HdCanvas &canvas, UCode c, double x, double y, const HdTextColor &color) const;
+	/// HD metrics; neither a native font sheet nor its alpha pixels are read.
+	SDL_Rect getHdCharSize(UCode c) const;
 };
 
 }

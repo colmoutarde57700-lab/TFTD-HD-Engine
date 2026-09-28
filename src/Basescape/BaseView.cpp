@@ -96,6 +96,7 @@ void BaseView::initText(Font *big, Font *small, Language *lang)
 void BaseView::setBase(Base *base)
 {
 	_base = base;
+	refreshCraftAssignments();
 	_selFacility = 0;
 
 	// Clear grid
@@ -443,7 +444,23 @@ void BaseView::updateNeighborFacilityBuildTime(BaseFacility* facility, BaseFacil
  */
 void BaseView::think()
 {
+	refreshCraftAssignments();
 	_timer->think(0, this);
+}
+
+void BaseView::refreshCraftAssignments()
+{
+	if (!_base) return;
+	auto craft = _base->getCrafts()->begin();
+	for (auto *facility : *_base->getFacilities())
+	{
+		facility->setCraftForDrawing(nullptr);
+		if (facility->getBuildTime() == 0 && facility->getRules()->getCrafts() > 0 && craft != _base->getCrafts()->end())
+		{
+			if ((*craft)->getStatus() != "STR_OUT") facility->setCraftForDrawing(*craft);
+			++craft;
+		}
+	}
 }
 
 /**
@@ -500,7 +517,6 @@ void BaseView::draw()
 		}
 	}
 
-	auto craftIt = _base->getCrafts()->begin();
 
 	for (const auto* fac : *_base->getFacilities())
 	{
@@ -587,22 +603,13 @@ void BaseView::draw()
 			}
 		}
 
-		// Draw crafts
-		fac->setCraftForDrawing(0);
-		if (fac->getBuildTime() == 0 && fac->getRules()->getCrafts() > 0)
+		// Assignment is maintained by the view lifecycle, never by drawing.
+		if (const auto *craft = fac->getCraftForDrawing())
 		{
-			if (craftIt != _base->getCrafts()->end())
-			{
-				if ((*craftIt)->getStatus() != "STR_OUT")
-				{
-					Surface *frame = _texture->getFrame((*craftIt)->getSkinSprite() + 33);
-					int fx = (fac->getX() * GRID_SIZE + (fac->getRules()->getSizeX() - 1) * GRID_SIZE / 2 + 2);
-					int fy = (fac->getY() * GRID_SIZE + (fac->getRules()->getSizeY() - 1) * GRID_SIZE / 2 - 4);
-					frame->blitNShade(this, fx, fy);
-					fac->setCraftForDrawing(*craftIt);
-				}
-				++craftIt;
-			}
+			Surface *frame = _texture->getFrame(craft->getSkinSprite() + 33);
+			const int fx = fac->getX() * GRID_SIZE + (fac->getRules()->getSizeX() - 1) * GRID_SIZE / 2 + 2;
+			const int fy = fac->getY() * GRID_SIZE + (fac->getRules()->getSizeY() - 1) * GRID_SIZE / 2 - 4;
+			frame->blitNShade(this, fx, fy);
 		}
 
 		// Draw time remaining

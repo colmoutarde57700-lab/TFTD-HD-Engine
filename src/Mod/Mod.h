@@ -504,6 +504,10 @@ public:
 	Sound *getSoundByDepth(unsigned int depth, unsigned int sound) const;
 	/// Gets list of LUT data.
 	const std::vector<std::vector<Uint8> > *getLUTs() const;
+	SDL_Color getTransparencyTint(unsigned color, unsigned opacity) const
+	{
+		return color < _transparencies.size() && opacity < TransparenciesOpacityLevels ? _transparencies[color][opacity] : SDL_Color{0,0,0,0};
+	}
 	/// Gets generic HD visual animation/state rules.
 	const std::map<std::string, HdVisualRule> &getHdVisuals() const { return _hdVisuals; }
 

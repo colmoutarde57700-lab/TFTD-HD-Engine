@@ -41,6 +41,7 @@ public:
 	MedikitView (int w, int h, int x, int y, Game * game, BattleUnit *unit, Text *partTxt, Text *woundTxt);
 	/// Draws the body view.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Gets the selected body part.
 	int getSelectedPart() const;
 	/// Updates the selected body part.

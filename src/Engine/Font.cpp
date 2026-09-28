@@ -17,10 +17,13 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "Font.h"
+#include "HdRenderTrace.h"
 #include "DosFont.h"
 #include "Surface.h"
 #include "FileMap.h"
 #include "Unicode.h"
+#include "Options.h"
+#include "Exception.h"
 
 namespace OpenXcom
 {
@@ -63,6 +66,17 @@ void Font::load(const YAML::YamlNodeReader& reader)
 		image.spacing = imageReader["spacing"].readVal(spacing);
 		std::string file = "Language/" + imageReader["file"].readVal<std::string>();
 		UString chars = Unicode::convUtf8ToUtf32(imageReader["chars"].readVal<std::string>());
+		std::string family = imageReader["file"].readVal<std::string>();
+		const auto separator = family.find_last_of("/\\");
+		if (separator != std::string::npos) family.erase(0, separator + 1);
+		const auto extension = family.find_last_of('.');
+		if (extension != std::string::npos) family.erase(extension);
+		auto hdFace = std::make_shared<HdFontFace>(family, image.width, image.height, image.spacing, _monospace);
+		for (size_t i = 0; i < chars.size(); ++i)
+		{
+			hdFace->define(chars[i], static_cast<int>(i));
+			_hdGlyphFaces[chars[i]] = hdFace;
+		}
 		image.surface = new Surface(image.width, image.height);
 		image.surface->loadImage(file);
 		_images.push_back(image);
@@ -217,6 +231,12 @@ int Font::getSpacing() const
  */
 SDL_Rect Font::getCharSize(UCode c) const
 {
+    if (Options::hdGraphics && !_hdGlyphFaces.empty())
+    {
+        try { return getHdCharSize(c); }
+        catch (const std::exception &error)
+        { hdTraceRoute("font-metrics", std::to_string(c), "LEGACY_NATIVE", error.what(), true); }
+    }
 	SDL_Rect size = { 0, 0, 0, 0 };
 	if (Unicode::isPrintable(c))
 	{
@@ -244,6 +264,44 @@ SDL_Rect Font::getCharSize(UCode c) const
 	size.x = size.w;
 	size.y = size.h;
 	return size;
+}
+
+SDL_Rect Font::getHdCharSize(UCode c) const
+{
+	SDL_Rect size = {0, 0, 0, 0};
+	if (Unicode::isPrintable(c))
+	{
+		auto face = _hdGlyphFaces.find(c);
+		if (face == _hdGlyphFaces.end()) { c = '?'; face = _hdGlyphFaces.find(c); }
+		if (face == _hdGlyphFaces.end()) throw Exception("[HD FONT ERROR] No HD definition for requested glyph");
+		const auto &glyph = face->second->glyph(c, _hdGlyphImages);
+		size.w = static_cast<Uint16>(glyph.advance);
+		size.h = static_cast<Uint16>(glyph.lineAdvance);
+		// Metrics are retained by the face. Presentation owns its own resource
+		// cache; do not keep a second decoded copy of every requested glyph.
+		_hdGlyphImages.clear();
+	}
+	else
+	{
+		if (_monospace) size.w = getWidth() + getSpacing();
+		else if (c == Unicode::TOK_NBSP) size.w = getWidth() / 4;
+		else if (c == '\t') size.w = getWidth() * 3 / 4;
+		else size.w = getWidth() / 2;
+		size.h = getHeight() + getSpacing();
+	}
+	size.x = size.w;
+	size.y = size.h;
+	return size;
+}
+
+double Font::appendHdChar(HdCanvas &canvas, UCode c, double x, double y, const HdTextColor &color) const
+{
+	auto face = _hdGlyphFaces.find(c);
+	if (face == _hdGlyphFaces.end()) { c = '?'; face = _hdGlyphFaces.find(c); }
+	if (face == _hdGlyphFaces.end()) throw Exception("[HD FONT ERROR] No HD definition for requested glyph");
+	const double advance = face->second->append(canvas, _hdGlyphImages, c, x, y, color);
+	_hdGlyphImages.clear();
+	return advance;
 }
 
 }

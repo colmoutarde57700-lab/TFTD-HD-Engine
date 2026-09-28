@@ -18,9 +18,17 @@
  */
 #include <assert.h>
 #include <set>
+#include <map>
+#include <sstream>
+#include <iomanip>
 #include "TileEngine.h"
 #include "AIModule.h"
 #include "Map.h"
+#include "BedrockRender.h"
+#include "RealHdLightingAuthority.h"
+#include "RealHdPerceptionAuthority.h"
+#include "RealHdMapSceneBuilder.h"
+#include "RealHdFovAuthority.h"
 #include "Camera.h"
 #include "Projectile.h"
 #include "../Savegame/SavedGame.h"
@@ -46,6 +54,33 @@
 
 namespace OpenXcom
 {
+bool TileEngine::realHdFovActive() const
+{
+	// Perception follows mission semantics, never renderer resource availability.
+	return Options::hdGraphics && _save &&
+		!_save->getBedrockRenderMaterial().empty();
+}
+
+bool TileEngine::ensureRealHdScene()
+{
+	if (!_save) return false;
+	const unsigned long long revision = _save->getRealHdGeometryRevision();
+	if (_realHdSceneRevision != revision || !_realHdScene.ready())
+	{
+		if (!RealHdMapSceneBuilder::build(_save, _realHdScene)) return false;
+		_realHdSceneRevision = revision;
+	}
+	return true;
+}
+
+const RealHdPhysicalGeometry *TileEngine::getRealHdPhysicalGeometry()
+{
+	if (_save && _realHdScene.ready() &&
+		_realHdSceneRevision == _save->getRealHdGeometryRevision())
+		return &_realHdScene;
+	return realHdFovActive() && ensureRealHdScene() ? &_realHdScene : nullptr;
+}
+
 namespace
 {
 
@@ -877,6 +912,7 @@ void iterateTilesLightMaxBound(SavedBattleGame* save, Position position, int eve
 	iterateVolume(Pos{position.x, position.y, position.z}, eventRadius, maxRange, gsMap, save->getMapSizeZ(), callback);
 }
 
+
 } // namespace
 
 constexpr int TileEngine::heightFromCenter[11];
@@ -1487,6 +1523,17 @@ inline bool TileEngine::inEventVisibilitySector(const Position &toCheck) const
 bool TileEngine::calculateUnitsInFOV(BattleUnit* unit, const Position eventPos, const int eventRadius)
 {
 	size_t oldNumVisibleUnits = unit->getUnitsSpottedThisTurn().size();
+	const bool nativeFov = realHdFovActive();
+	if (nativeFov && !ensureRealHdScene())
+	{
+		unit->clearVisibleUnits();
+		if (unit->getFaction() == FACTION_PLAYER)
+		{
+			_playerDetectionDirty = true;
+			if (_playerDetectionBatchDepth == 0) refreshPlayerDetection();
+		}
+		return false;
+	}
 	bool useTurretDirection = false;
 	if (Options::strafe && (unit->getTurretType() > -1)) {
 		useTurretDirection = true;
@@ -1496,7 +1543,7 @@ bool TileEngine::calculateUnitsInFOV(BattleUnit* unit, const Position eventPos, 
 		return false;
 
 	Position posSelf = unit->getPosition();
-	if (setupEventVisibilitySector(posSelf, eventPos, eventRadius))
+	if (nativeFov || setupEventVisibilitySector(posSelf, eventPos, eventRadius))
 	{
 		//Asked to do a full check. Or the event is overlapping our tile. Better check everything.
 		unit->clearVisibleUnits();
@@ -1515,14 +1562,21 @@ bool TileEngine::calculateUnitsInFOV(BattleUnit* unit, const Position eventPos, 
 				{
 					Position posToCheck = posOther + Position(x, y, 0);
 					//If we can now find any unit within the arc defined by the event tangent points, its visibility may have been affected by the event.
-					if (inEventVisibilitySector(posToCheck))
+					if (nativeFov || inEventVisibilitySector(posToCheck))
 					{
-						if (!unit->checkViewSector(posToCheck, useTurretDirection))
+						if (nativeFov
+							? !RealHdFovAuthority::sectorContains(unit,
+								_save->getTile(posToCheck), useTurretDirection)
+							: !unit->checkViewSector(posToCheck, useTurretDirection))
 						{
 							//Unit within arc, but not in view sector. If it just walked out we need to remove it.
 							unit->removeFromVisibleUnits(bu);
 						}
-						else if (visible(unit, _save->getTile(posToCheck))) // (distance is checked here)
+						else if (nativeFov
+							? RealHdFovAuthority::unitVisible(_save, _realHdScene,
+								unit, _save->getTile(posToCheck), getMaxViewDistance(),
+								getMaxDarknessToSeeUnits())
+							: visible(unit, _save->getTile(posToCheck))) // (distance is checked here)
 						{
 							//Unit (or part thereof) visible to one or more eyes of this unit.
 							if (unit->getFaction() == FACTION_PLAYER)
@@ -1558,6 +1612,20 @@ bool TileEngine::calculateUnitsInFOV(BattleUnit* unit, const Position eventPos, 
 			}
 		}
 	}
+	// PLAYER DETECTION AGGREGATION V1.
+	// BattleUnit::visible is a player-facing aggregate/HUD flag, while each
+	// Aquanaut owns its own _visibleUnits list. Upstream removes a target from
+	// the observer list when it leaves the view sector, but does not clear the
+	// aggregate flag here. That can leave the HUD contact latched after the last
+	// observer turns away. Rebuild the aggregate from the current per-observer
+	// OXCE visibility facts; presentation-only helmet/flare contact never enters
+	// these lists and therefore cannot create a HUD detection.
+	if (unit->getFaction() == FACTION_PLAYER)
+	{
+		_playerDetectionDirty = true;
+		if (_playerDetectionBatchDepth == 0) refreshPlayerDetection();
+	}
+
 	// we only react when there are at least the same amount of visible units as before AND the checksum is different
 	// this way we stop if there are the same amount of visible units, but a different unit is seen
 	// or we stop if there are more visible units seen
@@ -1566,6 +1634,37 @@ bool TileEngine::calculateUnitsInFOV(BattleUnit* unit, const Position eventPos, 
 		return true;
 	}
 	return false;
+}
+
+void TileEngine::refreshPlayerDetection()
+{
+	if (!_playerDetectionDirty) return;
+	_playerDetectionDirty = false;
+	std::vector<BattleUnit*> observers;
+	std::vector<BattleUnit*> targets;
+	for (BattleUnit *unit : *_save->getUnits())
+	{
+		if (!unit || unit->isOut()) continue;
+		if (unit->getFaction() == FACTION_PLAYER) observers.push_back(unit);
+		else targets.push_back(unit);
+	}
+	for (BattleUnit *target : targets)
+	{
+		int observerCount = 0;
+		for (BattleUnit *observer : observers)
+			if (observer->hasVisibleUnit(target)) ++observerCount;
+		const bool detectedByPlayer = observerCount != 0;
+		if (target->getVisible() != detectedByPlayer)
+		{
+			target->setVisible(detectedByPlayer);
+			Log(LOG_INFO) << "[PLAYER DETECTION AGGREGATION V1] target=" << target->getId()
+				<< " detected=" << (detectedByPlayer ? 1 : 0)
+				<< " observers=" << observerCount
+								<< " source=" << (realHdFovActive()
+									? "REAL_HD_VISIBLE_UNITS" : "OXCE_VISIBLE_UNITS")
+								<< " lightCoupling=NONE";
+		}
+	}
 }
 
 /**
@@ -1578,6 +1677,34 @@ bool TileEngine::calculateUnitsInFOV(BattleUnit* unit, const Position eventPos, 
 */
 void TileEngine::calculateTilesInFOV(BattleUnit *unit, const Position eventPos, const int eventRadius)
 {
+	if (realHdFovActive())
+	{
+		if (!unit || unit->getFaction() != FACTION_PLAYER) return;
+		unit->clearVisibleTiles();
+		if (unit->isOut() || !ensureRealHdScene()) return;
+		const Position origin = unit->getPosition();
+		const bool turretDirection = Options::strafe && unit->getTurretType() > -1;
+		const int range = getMaxViewDistance();
+		for (int dy = -range; dy <= range; ++dy)
+			for (int dx = -range; dx <= range; ++dx)
+			{
+				if (dx*dx + dy*dy > getMaxViewDistanceSq()) continue;
+				const int x = origin.x + dx, y = origin.y + dy;
+				for (int z = 0; z < _save->getMapSizeZ(); ++z)
+				{
+					Tile *target = _save->getTile(Position(x, y, z));
+					if (!target || !RealHdFovAuthority::terrainVisible(_save,
+						_realHdScene, unit, target, range, turretDirection)) continue;
+					unit->addToVisibleTiles(target);
+					target->setDiscovered(true, O_FLOOR);
+					Tile *east = _save->getTile(Position(x + 1, y, z));
+					Tile *south = _save->getTile(Position(x, y + 1, z));
+					if (east) east->setDiscovered(true, O_WESTWALL);
+					if (south) south->setDiscovered(true, O_NORTHWALL);
+				}
+			}
+		return;
+	}
 	bool useTurretDirection = false;
 	bool skipNarrowArcTest = false;
 	int direction;
@@ -1611,7 +1738,6 @@ void TileEngine::calculateTilesInFOV(BattleUnit *unit, const Position eventPos, 
 	const int distanceSqrMin = skipNarrowArcTest ? 0 : std::max(Position::distance2dSq(posSelf, eventPos) - eventRadius * eventRadius, 0);
 
 	//Variables for finding the tiles to test based on the view direction.
-	Position posTest;
 	std::vector<Position> _trajectory;
 	bool swap = (direction == 0 || direction == 4);
 	const int signX[8] = { +1, +1, +1, +1, -1, -1, -1, -1 };
@@ -1626,68 +1752,113 @@ void TileEngine::calculateTilesInFOV(BattleUnit *unit, const Position eventPos, 
 			++posSelf.z;
 		}
 	}
-	//Test all tiles within view cone for visibility.
-	for (int x = 0; x <= getMaxViewDistance(); ++x) //TODO: Possible improvement: find the intercept points of the arc at max view distance and choose a more intelligent sweep of values when an event arc is defined.
+	// TFTD HD / OXCE TERRAIN FOV CORE V1:
+	//
+	// The historical OpenXcom terrain-FOV path traces a 3-D tile Bresenham line
+	// to every target and then marks *every tile traversed by that line* visible.
+	// Because targets are tested on every Z level, a ray aimed at an upper level
+	// can traverse lower-level interior cells before it finally meets the floor/roof
+	// that blocks the ray. Those intermediate cells were therefore discovered even
+	// though their own surface was never directly visible. This is the long-standing
+	// vertical reveal leak inherited from the original-style tile visibility model.
+	//
+	// V1 keeps the same cone, range, blocking cache and gameplay LOS, but changes the
+	// terrain-discovery side effect: a successful ray reveals its target tile only.
+	// Blocking floors are still allowed to become discovered as the visible boundary
+	// surface, but cells hidden behind/below that boundary are not revealed merely
+	// because they were intermediate Bresenham cells. Unit spotting remains on the
+	// existing voxel/LOFT path in calculateUnitsInFOV().
+	unsigned fovDirectTargets = 0;
+	unsigned fovBlockedTargets = 0;
+	unsigned fovSuppressedIntermediate = 0;
+	unsigned fovCrossZIntermediateSuppressed = 0;
+	unsigned fovBlockedCrossZTransitions = 0;
+	unsigned fovBlockingFloors = 0;
+	auto revealDirectTile = [&](Tile *visibleTile)
 	{
-		if (direction & 1)
+		if (!visibleTile || unit->hasVisibleTile(visibleTile)) return;
+		unit->addToVisibleTiles(visibleTile);
+		visibleTile->setVisible(+1);
+		visibleTile->setDiscovered(true, O_FLOOR);
+
+		// Walls to the east or south of a visible tile are boundary surfaces of
+		// that tile and remain discoverable exactly as in the historical code.
+		const Position p = visibleTile->getPosition();
+		Tile *t = _save->getTile(Position(p.x + 1, p.y, p.z));
+		if (t) t->setDiscovered(true, O_WESTWALL);
+		t = _save->getTile(Position(p.x, p.y + 1, p.z));
+		if (t) t->setDiscovered(true, O_NORTHWALL);
+		++fovDirectTargets;
+	};
+
+	// Process one candidate XY column. The LOS/reveal authority below is shared
+	// by both the exact historical 90-degree enumerator and the REAL HD
+	// equipment-driven enumerator, so only candidate generation changes.
+	auto processVisibleColumn = [&](Position column)
+	{
+		const int dx = column.x - posSelf.x;
+		const int dy = column.y - posSelf.y;
+		const int distanceSqr = dx * dx + dy * dy;
+		if (distanceSqr > getMaxViewDistanceSq() || distanceSqr < distanceSqrMin)
+			return;
+		if (!inEventVisibilitySector(column))
+			return;
+
+		for (int z = 0; z < _save->getMapSizeZ(); z++)
 		{
-			y1 = 0;
-			y2 = getMaxViewDistance();
-		}
-		else
-		{
-			y1 = -x;
-			y2 = x;
-		}
-		for (int y = y1; y <= y2; ++y) //TODO: Possible improvement: find the intercept points of the arc at max view distance and choose a more intelligent sweep of values when an event arc is defined.
-		{
-			const int distanceSqr = x*x + y*y;
-			if (distanceSqr <= getMaxViewDistanceSq() && distanceSqr >= distanceSqrMin)
+			column.z = z;
+			if (!_save->getTile(column))
+				continue;
+
+			// Large units have multiple eye origins. The target column is already
+			// inside the angular sector; OXCE tile-space blocking remains unchanged.
+			int size = unit->getArmor()->getSize();
+			for (int xo = 0; xo < size; xo++)
 			{
-				posTest.x = posSelf.x + signX[direction] * (swap ? y : x);
-				posTest.y = posSelf.y + signY[direction] * (swap ? x : y);
-				//Only continue if the column of tiles at (x,y) is within the narrow arc of interest (if enabled)
-				if (inEventVisibilitySector(posTest))
+				for (int yo = 0; yo < size; yo++)
 				{
-					for (int z = 0; z < _save->getMapSizeZ(); z++)
+					Position poso = posSelf + Position(xo, yo, 0);
+					_trajectory.clear();
+					int tst = calculateLineTile(poso, column, _trajectory);
+
+					// Diagnostic: count the cells that the historical path-wide reveal
+					// would have inherited from another Z slice. These counters do not
+					// participate in the visibility decision.
+					if (_trajectory.size() > 1)
 					{
-						posTest.z = z;
-
-						if (_save->getTile(posTest)) //inside map?
+						fovSuppressedIntermediate += (unsigned)(_trajectory.size() - 1);
+						for (size_t i = 0; i + 1 < _trajectory.size(); ++i)
 						{
-							// this sets tiles to discovered if they are in LOS - tile visibility is not calculated in voxelspace but in tilespace
-							// large units have "4 pair of eyes"
-							int size = unit->getArmor()->getSize();
-							for (int xo = 0; xo < size; xo++)
-							{
-								for (int yo = 0; yo < size; yo++)
-								{
-									Position poso = posSelf + Position(xo, yo, 0);
-									_trajectory.clear();
-									int tst = calculateLineTile(poso, posTest, _trajectory);
-									if (tst > 127)
-									{
-										//Vision impacted something before reaching posTest. Throw away the impact point.
-										_trajectory.pop_back();
-									}
-									//Reveal all tiles along line of vision. Note: needed due to width of bresenham stroke.
-									for (const auto& posVisited : _trajectory)
-									{
-										//Add tiles to the visible list only once. BUT we still need to calculate the whole trajectory as
-										// this bresenham line's period might be different from the one that originally revealed the tile.
-										if (!unit->hasVisibleTile(_save->getTile(posVisited)))
-										{
-											unit->addToVisibleTiles(_save->getTile(posVisited));
-											_save->getTile(posVisited)->setVisible(+1);
-											_save->getTile(posVisited)->setDiscovered(true, O_FLOOR);
+							if (_trajectory[i].z != column.z) ++fovCrossZIntermediateSuppressed;
+						}
+					}
 
-											// walls to the east or south of a visible tile, we see that too
-											Tile* t = _save->getTile(Position(posVisited.x + 1, posVisited.y, posVisited.z));
-											if (t) t->setDiscovered(true, O_WESTWALL);
-											t = _save->getTile(Position(posVisited.x, posVisited.y + 1, posVisited.z));
-											if (t) t->setDiscovered(true, O_NORTHWALL);
-										}
-									}
+					if (tst <= 127)
+					{
+						// The target itself has an unobstructed tile-space LOS. Do not
+						// inherit discovery from unrelated intermediate Z cells.
+						revealDirectTile(_save->getTile(column));
+					}
+					else
+					{
+						++fovBlockedTargets;
+
+						// If the blocking transition crosses a Z boundary, expose the
+						// floor plane that actually stopped the ray. This preserves the
+						// readable roof/ceiling boundary while preventing any cell on the
+						// hidden side from becoming discovered as a side effect.
+						if (_trajectory.size() >= 2)
+						{
+							const Position impact = _trajectory.back();
+							const Position before = _trajectory[_trajectory.size() - 2];
+							if (impact.z != before.z)
+							{
+								++fovBlockedCrossZTransitions;
+								Tile *floorTile = _save->getTile(impact.z > before.z ? impact : before);
+								if (floorTile && floorTile->getMapData(O_FLOOR) && !floorTile->hasNoFloor(0))
+								{
+									floorTile->setDiscovered(true, O_FLOOR);
+									++fovBlockingFloors;
 								}
 							}
 						}
@@ -1695,7 +1866,75 @@ void TileEngine::calculateTilesInFOV(BattleUnit *unit, const Position eventPos, 
 				}
 			}
 		}
+	};
+
+	if (RealHdPerceptionAuthority::enabledFor(unit))
+	{
+		// REAL HD FOV ARMOR V1: the historical sweep itself is a 90-degree
+		// optimization. Wider armor sectors therefore need a full circular
+		// candidate scan followed by the shared equipment-sector predicate.
+		// At the 45-degree base profile this candidate set is exactly identical
+		// to the old OXCE sweep (validated for all 8 directions).
+		const int maxView = getMaxViewDistance();
+		for (int dx = -maxView; dx <= maxView; ++dx)
+		{
+			for (int dy = -maxView; dy <= maxView; ++dy)
+			{
+				if (dx * dx + dy * dy > getMaxViewDistanceSq())
+					continue;
+				Position candidate(posSelf.x + dx, posSelf.y + dy, posSelf.z);
+				if (!RealHdPerceptionAuthority::contains(unit, candidate, useTurretDirection))
+					continue;
+				processVisibleColumn(candidate);
+			}
+		}
 	}
+	else
+	{
+		// Exact historical OXCE 90-degree sweep for REAL HD OFF and all
+		// non-player observers. This branch is intentionally left intact.
+		for (int x = 0; x <= getMaxViewDistance(); ++x)
+		{
+			if (direction & 1)
+			{
+				y1 = 0;
+				y2 = getMaxViewDistance();
+			}
+			else
+			{
+				y1 = -x;
+				y2 = x;
+			}
+			for (int y = y1; y <= y2; ++y)
+			{
+				const int distanceSqr = x*x + y*y;
+				if (distanceSqr <= getMaxViewDistanceSq() && distanceSqr >= distanceSqrMin)
+				{
+					Position candidate;
+					candidate.x = posSelf.x + signX[direction] * (swap ? y : x);
+					candidate.y = posSelf.y + signY[direction] * (swap ? x : y);
+					candidate.z = posSelf.z;
+					processVisibleColumn(candidate);
+				}
+			}
+		}
+	}
+
+	#ifdef REAL_HD_DEEP_DIAGNOSTICS
+	if (unit->getFaction() == FACTION_PLAYER && (fovDirectTargets || fovBlockedTargets))
+	{
+		Log(LOG_INFO) << "[OXCE TERRAIN FOV CORE V1] unit=" << unit->getId()
+			<< " pos=" << unit->getPosition()
+			<< " dir=" << direction
+			<< " directTargets=" << fovDirectTargets
+			<< " blockedTargets=" << fovBlockedTargets
+			<< " suppressedIntermediate=" << fovSuppressedIntermediate
+			<< " suppressedCrossZIntermediate=" << fovCrossZIntermediateSuppressed
+			<< " blockedCrossZTransitions=" << fovBlockedCrossZTransitions
+			<< " blockingFloorsRevealed=" << fovBlockingFloors
+			<< " terrainDiscovery=target-only-v1";
+	}
+	#endif
 }
 
 /**
@@ -1758,7 +1997,20 @@ namespace
  */
 std::tuple<int, int> getVisibleDistanceMaxHelper(TileEngine* te, const Tile* tile, const BattleUnit* currentUnit, const BattleUnit *targetUnit)
 {
-	bool targetIsDark = tile->getShade() > te->getMaxDarknessToSeeUnits();
+	bool targetIsDark = RealHdLightingAuthority::targetIsDarkForObserver(
+		te->getSave(), te, tile, currentUnit, te->getMaxDarknessToSeeUnits());
+	if (Options::hdGraphics && currentUnit && currentUnit->getFaction() == FACTION_PLAYER)
+	{
+		static bool loggedRealHdPerceptionLight = false;
+		if (!loggedRealHdPerceptionLight)
+		{
+			Log(LOG_INFO) << "[REAL HD PERCEPTION LIGHT AUTHORITY V1][ACTIVE] observer=PLAYER"
+				<< " physicalLight=LL_AMBIENT+LL_FIRE+LL_ITEMS+HELMET_DIRECTIONAL"
+				<< " excluded=LL_UNITS depthLuma=NONE lut=NONE rasterLegacy=NONE"
+				<< " hostileObserverPath=UPSTREAM_UNCHANGED legacyOffPath=UPSTREAM_UNCHANGED";
+			loggedRealHdPerceptionLight = true;
+		}
+	}
 	bool targetOnFire = (targetUnit && targetUnit->getFire() > 0);
 	if (targetOnFire)
 	{
@@ -1925,6 +2177,9 @@ bool TileEngine::visible(BattleUnit *currentUnit, Tile *tile)
 
 	Position scanVoxel;
 	bool unitSeen = canTargetUnit(&originVoxel, tile, &scanVoxel, currentUnit, false);
+	#ifdef REAL_HD_DEEP_DIAGNOSTICS
+	const bool geometryLos = unitSeen;
+	#endif
 
 	// heat vision 100% = smoke effectiveness 0%
 	int smokeDensityFactor = 100 - Clamp(currentUnit->getVisibilityThroughSmoke(), 0, 100);
@@ -1945,6 +2200,42 @@ bool TileEngine::visible(BattleUnit *currentUnit, Tile *tile)
 		worker.execute(currentUnit->getArmor()->getScript<ModScript::VisibilityUnit>(), arg);
 		unitSeen = 0 < arg.getFirst();
 	}
+
+	#ifdef REAL_HD_DEEP_DIAGNOSTICS
+	if (Options::hdFovAuditProbeEnabled && RealHdPerceptionAuthority::enabledFor(currentUnit))
+	{
+		BattleUnit *target = tile->getUnit();
+		const float angle = RealHdPerceptionAuthority::angleDeg(currentUnit, tile->getPosition(), false);
+		const float fovHalf = RealHdPerceptionAuthority::halfAngleDeg(currentUnit);
+		const float distance = std::sqrt((float)Position::distance2dSq(currentUnit->getPosition(), tile->getPosition()));
+		const float physicalLight = RealHdLightingAuthority::perceptionLightAt(_save, this, tile);
+		const float helmetLight = RealHdLightingAuthority::helmetLightAt(_save, this, tile->getPosition());
+		const bool targetDark = RealHdLightingAuthority::targetIsDarkForObserver(_save, this, tile, currentUnit, getMaxDarknessToSeeUnits());
+		const int rangeTiles = targetDark ? currentUnit->getMaxViewDistanceAtDark(target) : currentUnit->getMaxViewDistanceAtDay(target);
+		std::ostringstream key, signature;
+		key << currentUnit->getId() << ':' << (target ? target->getId() : -1);
+		signature << currentUnit->getPosition() << ':' << currentUnit->getDirection() << ':' << tile->getPosition()
+			<< ':' << geometryLos << ':' << unitSeen << ':' << targetDark
+			<< ':' << (int)std::lround(angle * 10.0f) << ':' << (int)std::lround(physicalLight * 1000.0f);
+		static std::map<std::string, std::string> lastAudit;
+		if (lastAudit[key.str()] != signature.str())
+		{
+			lastAudit[key.str()] = signature.str();
+			Log(LOG_INFO) << "[REAL HD PERCEPTION AUDIT V2] observer=" << currentUnit->getId()
+				<< " armor=" << (currentUnit->getArmor() ? currentUnit->getArmor()->getType() : std::string("<none>"))
+				<< " target=" << (target ? target->getId() : -1)
+				<< " angleDeg=" << std::fixed << std::setprecision(1) << angle
+				<< " fovHalfDeg=" << fovHalf
+				<< " distanceTiles=" << distance
+				<< " helmetLight=" << std::setprecision(3) << helmetLight
+				<< " physicalLight=" << physicalLight
+				<< " targetDark=" << (targetDark ? 1 : 0)
+				<< " rangeLimitTiles=" << rangeTiles
+				<< " geometryLOS=" << (geometryLos ? "PASS" : "FAIL")
+				<< " finalVisible=" << (unitSeen ? "PASS" : "FAIL");
+		}
+	}
+	#endif
 	return unitSeen;
 }
 
@@ -2490,6 +2781,7 @@ bool TileEngine::canTargetTile(Position *originVoxel, Tile *tile, int part, Posi
  */
 void TileEngine::calculateFOV(Position position, int eventRadius, const bool updateTiles, const bool appendToTileVisibility)
 {
+	++_playerDetectionBatchDepth;
 	int updateRadius;
 	if (eventRadius == -1)
 	{
@@ -2518,6 +2810,7 @@ void TileEngine::calculateFOV(Position position, int eventRadius, const bool upd
 			calculateUnitsInFOV(bu, position, eventRadius);
 		}
 	}
+	if (--_playerDetectionBatchDepth == 0) refreshPlayerDetection();
 }
 
 /**
@@ -3267,6 +3560,23 @@ void TileEngine::hit(BattleActionAttack attack, Position center, int power, cons
 
 	voxelCheckFlush();
 	const VoxelType part = (terrainMeleeTilePart > 0) ? (VoxelType)terrainMeleeTilePart : voxelCheck(center, attack.attacker);
+
+	// BEDROCK WEAPON IMPACT RELIEF V6W2: direct ranged hits on the logical SAND floor
+	// get a persistent HD material mark. This restores the visual language that
+	// disappeared when BEDROCK bypassed Legacy SAND sprites, without changing damage.
+	if (rangeAtack && terrainMeleeTilePart == 0 && part == V_FLOOR
+		&& BedrockRenderPolicy::resolve(_save) == BedrockMaterial::Sand
+		&& BedrockRenderPolicy::hasSurface(BedrockMaterial::Sand, tile))
+	{
+		const std::string impactSource = attack.damage_item ? attack.damage_item->getRules()->getType()
+			: (attack.weapon_item ? attack.weapon_item->getRules()->getType() : std::string("WEAPON"));
+		const int impactDiameterMilliTiles = 1000800; // V5 presentation marker 1,000,000 + real 0.8-tile diameter
+		_save->addBedrockCraterStamp(center, impactDiameterMilliTiles);
+		Log(LOG_INFO) << "[BEDROCK WEAPON IMPACT RELIEF V6W2][STAMP] voxel=" << center
+			<< " tile=" << tilePos << " source=" << impactSource
+			<< " diameter=0.8tile style=deterministic-at-render hdPipeline=1";
+	}
+
 	const int damage = type->getRandomDamage(power);
 	const int tileFinalDamage = type->getTileFinalDamage(type->getRandomDamageForTile(power, damage));
 	if (part >= V_FLOOR && part <= V_OBJECT)
@@ -3367,6 +3677,40 @@ void TileEngine::hit(BattleActionAttack attack, Position center, int power, cons
 void TileEngine::explode(BattleActionAttack attack, Position center, int power, const RuleDamageType *type, int maxRadius, bool rangeAtack)
 {
 	const Position centetTile = center.toTile();
+
+	// BEDROCK CRATER FIELD V1. Decide eligibility before OXCE destruction mutates
+	// the floor/object records. This is presentation-only: explosion radius, damage,
+	// terrain destruction, pathfinding and terrain levels remain fully authoritative OXCE.
+	bool bedrockCraterCandidate = false;
+	int bedrockCraterDiameterMilliTiles = 1000;
+	if (type && !type->FireBlastCalc && type->ToTile > 0.0f && BedrockRenderPolicy::resolve(_save) == BedrockMaterial::Sand)
+	{
+		Tile *craterTile = _save->getTile(centetTile);
+		bedrockCraterCandidate = craterTile && BedrockRenderPolicy::hasSurface(BedrockMaterial::Sand, craterTile);
+		if (bedrockCraterCandidate)
+		{
+			// BEDROCK BLAST IMPACT V4: the HD material field follows the
+			// same horizontal reach as OXCE terrain damage instead of an artistic
+			// 0.7..1.45 tile approximation. OXCE processes a tile only while the
+			// propagated explosion power is still > 0, and never beyond maxRadius.
+			// This gives the open-ground, unobstructed physical radius; walls and
+			// terrain can still reduce the real destruction footprint further.
+			int physicalRadiusTiles = std::max(0, maxRadius);
+			if (type->RadiusReduction > 0.0f)
+			{
+				const int powerLimitedRadius = std::max(0,
+					(int)std::ceil((double)std::max(0, power) / (double)type->RadiusReduction) - 1);
+				physicalRadiusTiles = std::min(physicalRadiusTiles, powerLimitedRadius);
+			}
+
+			// Cover the complete affected tile footprint: centers from -R..+R
+			// correspond to (2R+1) tile widths. The mask is still merged by MAX,
+			// so overlapping explosions create one continuous field.
+			const int visualDiameterTiles = std::max(1, 2 * physicalRadiusTiles + 1);
+			bedrockCraterDiameterMilliTiles = visualDiameterTiles * 1000;
+		}
+	}
+
 	int hitSide = 0;
 	int diagonalWall = 0;
 	int power_;
@@ -3561,6 +3905,20 @@ void TileEngine::explode(BattleActionAttack attack, Position center, int power, 
 				applyGravity(j);
 		}
 	}
+
+	if (bedrockCraterCandidate)
+	{
+		const std::string craterSource = attack.damage_item ? attack.damage_item->getRules()->getType() : std::string("TERRAIN");
+		_save->addBedrockCraterStamp(center, bedrockCraterDiameterMilliTiles);
+		const int physicalRadiusTiles = std::max(0, (bedrockCraterDiameterMilliTiles / 1000 - 1) / 2);
+		Log(LOG_INFO) << "[BEDROCK IMPACT VARIANTS V5][BLAST-STAMP] voxel=" << center
+			<< " tile=" << centetTile << " source=" << craterSource
+			<< " power=" << power << " blastRadius=" << maxRadius
+			<< " physicalRadius=" << physicalRadiusTiles
+			<< " visualDiameter=" << (bedrockCraterDiameterMilliTiles / 1000.0f)
+			<< "tile style=deterministic-at-render merge=MAX hdPipeline=1";
+	}
+
 	calculateLighting(LL_AMBIENT, centetTile, maxRadius + 1, true); // roofs could have been destroyed and fires could have been started
 	calculateFOV(centetTile, maxRadius + 1, true, true);
 	if (attack.attacker && Position::distance2d(centetTile, attack.attacker->getPosition()) > maxRadius + 1)
@@ -5800,6 +6158,7 @@ bool TileEngine::validateThrow(BattleAction &action, Position originVoxel, Posit
  */
 void TileEngine::recalculateFOV()
 {
+	++_playerDetectionBatchDepth;
 	for (auto* bu : *_save->getUnits())
 	{
 		if (bu->getTile() != 0)
@@ -5807,6 +6166,7 @@ void TileEngine::recalculateFOV()
 			calculateFOV(bu);
 		}
 	}
+	if (--_playerDetectionBatchDepth == 0) refreshPlayerDetection();
 }
 
 /**

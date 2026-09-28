@@ -30,7 +30,7 @@ namespace OpenXcom
  * @param leftBlackBand Screen's left black band width.
  * @param ev Pointer to SDL_event.
  */
-Action::Action(SDL_Event *ev, double scaleX, double scaleY, int topBlackBand, int leftBlackBand) : _ev(ev), _scaleX(scaleX), _scaleY(scaleY), _topBlackBand(topBlackBand), _leftBlackBand(leftBlackBand), _mouseX(-1), _mouseY(-1), _surfaceX(-1), _surfaceY(-1), _surfaceScaleX(1.0), _surfaceScaleY(1.0), _presentationAnchorX(0), _presentationAnchorY(0), _presentationScaleX(1.0), _presentationScaleY(1.0), _sender(0)
+Action::Action(SDL_Event *ev, double scaleX, double scaleY, int topBlackBand, int leftBlackBand) : _ev(ev), _scaleX(scaleX), _scaleY(scaleY), _topBlackBand(topBlackBand), _leftBlackBand(leftBlackBand), _mouseX(-1), _mouseY(-1), _surfaceX(-1), _surfaceY(-1), _surfaceScaleX(1.0), _surfaceScaleY(1.0), _presentationAnchorX(0), _presentationAnchorY(0), _presentationScaleX(1.0), _presentationScaleY(1.0), _logicalMouseOverrideEnabled(false), _logicalMouseOverrideX(-1.0), _logicalMouseOverrideY(-1.0), _sender(0)
 {
 }
 
@@ -80,6 +80,7 @@ void Action::setMouseAction(int mouseX, int mouseY, int surfaceX, int surfaceY, 
 	_presentationAnchorY = 0;
 	_presentationScaleX = 1.0;
 	_presentationScaleY = 1.0;
+	clearLogicalMouseOverride();
 }
 
 void Action::setPresentationTransform(int anchorX, int anchorY, double scaleX, double scaleY)
@@ -88,6 +89,20 @@ void Action::setPresentationTransform(int anchorX, int anchorY, double scaleX, d
 	_presentationAnchorY = anchorY;
 	_presentationScaleX = scaleX > 0.0 ? scaleX : 1.0;
 	_presentationScaleY = scaleY > 0.0 ? scaleY : 1.0;
+}
+
+void Action::setLogicalMouseOverride(double logicalX, double logicalY)
+{
+	_logicalMouseOverrideEnabled = true;
+	_logicalMouseOverrideX = logicalX;
+	_logicalMouseOverrideY = logicalY;
+}
+
+void Action::clearLogicalMouseOverride()
+{
+	_logicalMouseOverrideEnabled = false;
+	_logicalMouseOverrideX = -1.0;
+	_logicalMouseOverrideY = -1.0;
 }
 
 /**
@@ -155,6 +170,8 @@ double Action::getDisplayXMouse() const
 
 double Action::getAbsoluteXMouse() const
 {
+	if (_logicalMouseOverrideEnabled)
+		return _logicalMouseOverrideX;
 	const double x = getDisplayXMouse();
 	if (x < 0) return -1;
 	return _presentationAnchorX + (x - _presentationAnchorX) / _presentationScaleX;
@@ -175,6 +192,8 @@ double Action::getDisplayYMouse() const
 
 double Action::getAbsoluteYMouse() const
 {
+	if (_logicalMouseOverrideEnabled)
+		return _logicalMouseOverrideY;
 	const double y = getDisplayYMouse();
 	if (y < 0) return -1;
 	return _presentationAnchorY + (y - _presentationAnchorY) / _presentationScaleY;

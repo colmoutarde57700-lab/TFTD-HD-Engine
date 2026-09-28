@@ -1,38 +1,17 @@
-# TFTD HD engine modifications
+# Changes since public RC12
 
-This file summarizes the principal modifications relative to upstream OXCE commit `22f1aae75c3047ceb0c0e24abe74938fa7230793`.
+## REAL HD migration through P2ZI
 
-## Rendering / HD architecture
+Renderer-neutral physical geometry, scene construction, world coverage, visibility/FOV, lighting/perception authority and HD presentation. The required pixel firewall guards native OXCE raster presentation paths. GPU rendering, providers, interface production, camera and combat effects evolved with this migration.
 
-- HD render-space work through x16 / 512×640 tactical-cell assets.
-- Coexistence of Legacy indexed graphics and true-colour RGBA assets.
-- Direct3D 11 HD GPU compositor/backend.
-- HD image loading/cache and HD visual routing rules.
-- Separate HD colour semantics for Legacy indexed, environment-graded and fixed/native artwork.
-- Continuous native RGB environment transform with CPU/GPU paths.
-- High-precision frame pacing while keeping gameplay timing separate.
-- Independent HD presentation timing where applicable, while later restoring exact Legacy cadence for automatically discovered terrain animations.
+## P2ZJ stairs
 
-## Tactical / compatibility work in the current stable lineage
+Disjoint storey bands prevent composition gaps and overlaps. Own-floor and virtual stair positioning are handled separately. 3D replacement marks only the actual command range, preserving unrelated earlier commands. This does not claim universal 3D depth correctness for every scene.
 
-The final stable lineage incorporates, in order, the preserved P10A baseline and subsequent work covering:
+## P2ZJ roof caustics
 
-- Legacy terrain-animation cadence compatibility.
-- Environment family/block profiling used by the HD terrain path.
-- Training visual roster and safe playable alien test support.
-- Native alien weapons / mind-control related training fixes.
-- Inventory safety fixes for test units.
-- Unit-part rendering integration.
-- Faction/equipment audit fixes.
-- Debug-turn decoupling and animation timing audit.
-- PSI cadence adjustment.
-- Multi-tile mind-control/self-indicator correction.
-- HUD visible-unit right anchoring.
-- Lighting V1 changes.
-- Flare reconnaissance rendering.
-- Chemical flare decay/burn-cycle handling.
-- Current HUD contact-column layout.
+Upward-facing floor caustics depend on sunlight exposure. BlockLight checks across all higher storeys use a 16-by-16 grid and respect partial coverage. Sight-only barriers do not block light; a roof does not occlude itself.
 
-## Exact modified-file inventory
+## Release preparation
 
-See `docs/MODIFIED_FILES_FROM_UPSTREAM.txt` for the automatically generated list of code/data files that differ from the upstream snapshot before the public documentation files were added.
+Portable resource/toolchain paths, source/binary provenance and automated geometry, pixel-firewall and HLSL checks. RC12 history retained. Commercial data, private art and Workshop excluded.

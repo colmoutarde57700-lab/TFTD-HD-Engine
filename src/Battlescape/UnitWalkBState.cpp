@@ -30,6 +30,7 @@
 #include "../Engine/Sound.h"
 #include "../Engine/Options.h"
 #include "../Engine/Logger.h"
+#include "../Engine/HdPerf.h"
 #include "../Mod/Armor.h"
 #include "../Mod/Mod.h"
 #include "UnitFallBState.h"

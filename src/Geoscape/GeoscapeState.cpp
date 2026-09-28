@@ -1,3 +1,4 @@
+#include "../Engine/HdRenderTrace.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -23,18 +24,23 @@
 #include <algorithm>
 #include <climits>
 #include <functional>
+#include <cmath>
 #include "../Engine/RNG.h"
 #include "../Engine/Game.h"
 #include "../Engine/Action.h"
 #include "../Mod/Mod.h"
 #include "../Engine/LocalizedText.h"
 #include "../Engine/Screen.h"
+#include "../Engine/HdGpuBackend.h"
+#include "../Engine/FileMap.h"
 #include "../Engine/Sound.h"
 #include "../Engine/Surface.h"
+#include "../Engine/HdUiPicture.h"
 #include "../Engine/Options.h"
 #include "../Engine/Collections.h"
 #include "../Engine/Unicode.h"
 #include "Globe.h"
+#include "GeoscapeHdMode.h"
 #include "../Interface/ComboBox.h"
 #include "../Interface/Text.h"
 #include "../Interface/TextButton.h"
@@ -138,6 +144,46 @@
 namespace OpenXcom
 {
 
+namespace
+{
+// GEOSCAPE HD CAMERA V5: the authored Earth keeps a constant unit scale.
+// OXCE's existing zoom radius is retained only as a compatibility/control
+// input and is translated into camera distance under a fixed vertical FOV.
+// This preserves savegame/dogfight/UI zoom semantics without ever stretching
+// the 3D mesh to fit the rectangular Geoscape viewport.
+const float GEOSCAPE_HD_CAMERA_FOV_Y_DEG = 45.0f;
+const float GEOSCAPE_HD_CAMERA_MIN_DISTANCE = 1.08f;
+const float GEOSCAPE_HD_CAMERA_MAX_DISTANCE = 8.0f;
+
+double geoscapeHdRequestedRadiusNdc(const Globe *globe)
+{
+	if (!globe || globe->getHeight() <= 0) return 0.90;
+	return std::max(0.05, 2.0 * globe->getDisplayRadius() / (double)globe->getHeight());
+}
+
+float geoscapeHdCameraDistance(const Globe *globe)
+{
+	const double fovY = (double)GEOSCAPE_HD_CAMERA_FOV_Y_DEG * M_PI / 180.0;
+	const double focalY = 1.0 / std::tan(fovY * 0.5);
+	const double projectedRadius = geoscapeHdRequestedRadiusNdc(globe);
+	// Perspective silhouette of a unit sphere viewed from distance d:
+	// projectedRadius = focalY / sqrt(d*d - 1).
+	const double distance = std::sqrt(1.0 + (focalY * focalY) / (projectedRadius * projectedRadius));
+	return (float)std::max((double)GEOSCAPE_HD_CAMERA_MIN_DISTANCE,
+		std::min((double)GEOSCAPE_HD_CAMERA_MAX_DISTANCE, distance));
+}
+
+double geoscapeHdProjectedRadiusPhysical(const Globe *globe, int viewportHeightPhysical)
+{
+	const double fovY = (double)GEOSCAPE_HD_CAMERA_FOV_Y_DEG * M_PI / 180.0;
+	const double focalY = 1.0 / std::tan(fovY * 0.5);
+	const double distance = geoscapeHdCameraDistance(globe);
+	const double denom = std::sqrt(std::max(0.0001, distance * distance - 1.0));
+	const double projectedRadiusNdc = focalY / denom;
+	return std::max(16.0, 0.5 * (double)std::max(1, viewportHeightPhysical) * projectedRadiusNdc);
+}
+}
+
 void GeoscapeState::applyHdUiPresentationScale()
 {
 	// The Geoscape is already laid out against the full logical resolution.
@@ -188,7 +234,7 @@ void GeoscapeState::applyHdUiPresentationScale()
  * Initializes all the elements in the Geoscape screen.
  * @param game Pointer to the core game.
  */
-GeoscapeState::GeoscapeState() : _pause(false), _zoomInEffectDone(false), _zoomOutEffectDone(false), _minimizedDogfights(0), _slowdownCounter(0)
+GeoscapeState::GeoscapeState() : _pause(false), _zoomInEffectDone(false), _zoomOutEffectDone(false), _minimizedDogfights(0), _slowdownCounter(0), _hdGlobeRawDrag(false), _hdGlobeRawLastX(0), _hdGlobeRawLastY(0), _hdGlobeRawAccumX(0), _hdGlobeRawAccumY(0)
 {
 	int screenWidth = Options::baseXGeoscape;
 	int screenHeight = Options::baseYGeoscape;
@@ -286,6 +332,10 @@ GeoscapeState::GeoscapeState() : _pause(false), _zoomInEffectDone(false), _zoomO
 	add(_btnRotateDown);
 	add(_btnZoomIn);
 	add(_btnZoomOut);
+    // These are hit regions over the sidebar PNG; they intentionally draw nothing.
+    if (Options::hdGraphics)
+        for (Surface *hit : {_btnRotateLeft, _btnRotateRight, _btnRotateUp, _btnRotateDown, _btnZoomIn, _btnZoomOut})
+            hit->setHdPicture(HdUiPicture(hit->getWidth(), hit->getHeight()));
 
 	add(_sideTop, "button", "geoscape");
 	add(_sideBottom, "button", "geoscape");
@@ -313,14 +363,55 @@ GeoscapeState::GeoscapeState() : _pause(false), _zoomInEffectDone(false), _zoomO
 	// UI scale only to sidebar/debug controls, never to the globe itself.
 	applyHdUiPresentationScale();
 
+	// PRESENTATION_SPACES_TRACE_V1: snapshot current world/sidebar transforms.
+	{
+		const PresentationContext &pc = _game->getScreen()->getPresentationContext();
+		auto traceSurface = [&](const char *label, Surface *surface)
+		{
+			if (!surface) return;
+			const int ds = std::max(1, surface->getDisplayScale());
+			const int dx = surface->getDisplayX();
+			const int dy = surface->getDisplayY();
+			const int dw = surface->getWidth() * ds;
+			const int dh = surface->getHeight() * ds;
+			Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][GEO-SURFACE] " << label
+				<< " logical=" << surface->getX() << "," << surface->getY() << "," << surface->getWidth() << "x" << surface->getHeight()
+				<< " display=" << dx << "," << dy << "," << dw << "x" << dh
+				<< " displayScale=" << ds
+				<< " physical=" << pc.logicalToPhysicalX(dx) << "," << pc.logicalToPhysicalY(dy)
+				<< "->" << pc.logicalToPhysicalX(dx + dw) << "," << pc.logicalToPhysicalY(dy + dh);
+		};
+		Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][GEOSCAPE] baseResolution="
+			<< Options::baseXResolution << "x" << Options::baseYResolution
+			<< " baseGeoscape=" << Options::baseXGeoscape << "x" << Options::baseYGeoscape
+			<< " worldScaleOpt=" << Options::geoscapeScale
+			<< " uiScale=" << Options::getGeoUiScale()
+			<< " pcLogical=" << pc.logicalWidth() << "x" << pc.logicalHeight()
+			<< " pcPhysical=" << pc.physicalWidth() << "x" << pc.physicalHeight()
+			<< " pcScale=" << pc.scaleX() << "x" << pc.scaleY();
+		traceSurface("globe", _globe);
+		traceSurface("sidebar", _sidebar);
+		traceSurface("intercept", _btnIntercept);
+		traceSurface("debug", _txtDebug);
+	}
+
 	// Set up objects
 	Surface *geobord = _game->getMod()->getSurface("GEOBORD.SCR");
 	geobord->setX(_sidebar->getX() - geobord->getWidth() + _sidebar->getWidth());
 	geobord->setY(_sidebar->getY());
 	_sidebar->copy(geobord);
+	if (Options::hdGraphics) _sidebar->setHdPicture(geobord->getHdPicture().cropped({
+		double(_sidebar->getX() - geobord->getX()), double(_sidebar->getY() - geobord->getY()),
+		double(_sidebar->getWidth()), double(_sidebar->getHeight())}));
 	_game->getMod()->getSurface("ALTGEOBORD.SCR")->blitNShade(_bg, 0, 0);
+	if (Options::hdGraphics) _bg->setHdPicture(_game->getMod()->getSurface("ALTGEOBORD.SCR")->getHdPicture());
 
 	_sideLine->drawRect(0, 0, _sideLine->getWidth(), _sideLine->getHeight(), 15);
+    if (Options::hdGraphics)
+    {
+        HdUiPicture line(_sideLine->getWidth(), _sideLine->getHeight());
+        line.fill(line.bounds(), 15); _sideLine->setHdPicture(line);
+    }
 
 	_btnIntercept->initText(_game->getMod()->getFont("FONT_GEO_BIG"), _game->getMod()->getFont("FONT_GEO_SMALL"), _game->getLanguage());
 	_btnIntercept->setText(tr("STR_INTERCEPT"));
@@ -567,11 +658,261 @@ void GeoscapeState::blit()
 }
 
 /**
+ * GEOSCAPE HD PROOF OF LIFE V1 physical presentation.
+ *
+ * The logical Geoscape remains authoritative for strategic state/gameplay.
+ * Camera presentation + camera input are owned by the HD Geoscape mode when
+ * its provider is installed; ordinary sidebar/strategic UI remains OXCE.
+ */
+void GeoscapeState::blitPhysical(SDL_Surface *destination, Screen *screen, bool redrawLegacy)
+{
+	if (screen) screen->setHdTraceContext("Geoscape", true);
+	// Source model: "Earth Terrain and Sea Map" by John Davies (Sketchfab), CC BY-SA 4.0.
+	const char *meshPath = geoscapeHdEarthMeshPath();
+	HdGpuBackend &gpu = HdGpuBackend::instance();
+	const bool proof = geoscapeHdModeActive() && destination && screen && gpu.frameActive();
+
+	if (!proof)
+	{
+        hdTraceRoute("globe", meshPath, "LEGACY_NATIVE", "3D provider or GPU frame unavailable", true);
+        GeoscapeNativePresentationScope nativeGlobe;
+        _globe->invalidate();
+		State::blitPhysical(destination, screen, redrawLegacy);
+		for (auto *dogfight : _dogfights) dogfight->blitPhysical(destination, screen, true);
+		return;
+	}
+
+	const int ds = std::max(1, _globe->getDisplayScale());
+	const int lx0 = _globe->getDisplayX();
+	const int ly0 = _globe->getDisplayY();
+	const int lx1 = lx0 + _globe->getWidth() * ds;
+	const int ly1 = ly0 + _globe->getHeight() * ds;
+	const int px0 = screen->logicalToPhysicalX(lx0);
+	const int py0 = screen->logicalToPhysicalY(ly0);
+	const int px1 = screen->logicalToPhysicalX(lx1);
+	const int py1 = screen->logicalToPhysicalY(ly1);
+	const int pw = std::max(1, px1 - px0);
+	const int ph = std::max(1, py1 - py0);
+
+    // The background belongs behind the existing GPU mesh, not in its overlay.
+    if (_bg->isDisplayVisible() && !blitSurfaceWithHdOverridePhysical(_bg, destination, screen))
+        screen->blitSurfacePhysical(_bg, false, destination);
+	const float cameraDistance = geoscapeHdCameraDistance(_globe);
+
+	const bool globeDrawn = gpu.drawGeoscapeGlobeProof(meshPath, px0, py0, pw, ph,
+		(float)_globe->getCenterLongitude(), (float)_globe->getCenterLatitude(),
+		cameraDistance, GEOSCAPE_HD_CAMERA_FOV_Y_DEG);
+    hdTraceRoute("globe", meshPath, globeDrawn ? "REAL_HD" : "LEGACY_NATIVE",
+        globeDrawn ? "existing 3D mesh and camera" : "3D draw failed", !globeDrawn);
+    if (!globeDrawn)
+    {
+        GeoscapeNativePresentationScope nativeGlobe;
+        _globe->invalidate();
+        screen->blitNativeSurfaceAt(_globe, destination, px0, py0, pw, ph);
+    }
+
+	static bool logged = false;
+	if (!logged)
+	{
+		Log(LOG_INFO) << "[GEOSCAPE HD PROOF OF LIFE V1 R8] asset=" << meshPath
+			<< " viewport=" << px0 << "," << py0 << "," << pw << "x" << ph
+			<< " cameraDistance=" << cameraDistance
+			<< " fovY=" << GEOSCAPE_HD_CAMERA_FOV_Y_DEG
+			<< " northSouth=CORRECTED"
+			<< " legacyGlobeBody=FORCE_CLEARED"
+			<< " camera=TRUE_PERSPECTIVE_RMB_V6_HARD_OWNERSHIP"
+			<< " meshScale=CONSTANT zoom=DOLLY_FROM_OXCE_RADIUS"
+			<< " horizontalEdgeToEdgeDegrees=360 verticalDiameterDegrees=180"
+			<< " legacyMouseCamera=HARD_BYPASS modePredicate=STABLE"
+			<< " gpuDraw=" << (globeDrawn ? "OK" : "FAILED");
+		logged = true;
+	}
+
+	// Present every ordinary Geoscape surface except the Legacy Globe itself.
+	// This preserves the sidebar/UI without repainting the suppressed globe body.
+	for (Surface *surface : _surfaces)
+	{
+		if (!surface || !surface->isDisplayVisible() || surface == _globe || surface == _bg) continue;
+		if (!blitSurfaceWithHdOverridePhysical(surface, destination, screen))
+		{
+			screen->blitSurfacePhysical(surface, false, destination);
+		}
+	}
+	for (auto *dogfight : _dogfights) dogfight->blitPhysical(destination, screen, true);
+}
+
+/**
+ * GEOSCAPE HD CAMERA V6 / INPUT OWNERSHIP V1.
+ *
+ * Raw SDL input path, called directly from Game::run BEFORE the event reaches
+ * State/InteractiveSurface/Globe. This is a deliberate cut-over: while the HD
+ * mesh owns the globe presentation, RMB drag no longer depends on the Legacy
+ * Globe drag-scroll implementation, Action coordinate transforms, cursor warp,
+ * or independently scaled Geoscape UI surfaces.
+ *
+ * Returning true means Game should still update the global cursor/screen state
+ * but must NOT forward the owned camera event to the current State. The HD
+ * controller owns RMB + wheel; Legacy camera handlers remain dormant while
+ * strategic LMB interactions continue through the normal Globe surface.
+ */
+bool GeoscapeState::handleHdGlobeRawEvent(const SDL_Event &event)
+{
+	Screen *screen = _game ? _game->getScreen() : nullptr;
+	// GEOSCAPE HD INPUT OWNERSHIP V1: use a stable mode predicate here.
+	// GPU readiness is deliberately NOT part of input ownership. Otherwise a
+	// transient frame fallback could wake Legacy drag/recenter code mid-session.
+	const bool hdGlobe = screen && geoscapeHdModeActive();
+
+	auto cancelDrag = [&](const char *reason)
+	{
+		if (_hdGlobeRawDrag)
+		{
+			Log(LOG_INFO) << "[GEOSCAPE HD CAMERA V6][RMB-DRAG-CANCEL] reason=" << reason
+				<< " deltaPhysical=" << _hdGlobeRawAccumX << "," << _hdGlobeRawAccumY;
+		}
+		_hdGlobeRawDrag = false;
+		_hdGlobeRawAccumX = _hdGlobeRawAccumY = 0;
+	};
+
+	if (!hdGlobe)
+	{
+		cancelDrag("HD_GLOBE_INACTIVE");
+		return false;
+	}
+
+	// Keyboard/state-changing/window events must never be swallowed. In
+	// particular ESC must reach the normal Geoscape pause/menu handling.
+	if (event.type == SDL_KEYDOWN || event.type == SDL_ACTIVEEVENT ||
+		event.type == SDL_VIDEORESIZE || event.type == SDL_QUIT)
+	{
+		cancelDrag(event.type == SDL_KEYDOWN ? "KEY_EVENT" : "STATE_OR_WINDOW_EVENT");
+		return false;
+	}
+
+	const int ds = std::max(1, _globe->getDisplayScale());
+	const int lx0 = _globe->getDisplayX();
+	const int ly0 = _globe->getDisplayY();
+	const int lx1 = lx0 + _globe->getWidth() * ds;
+	const int ly1 = ly0 + _globe->getHeight() * ds;
+	const int px0 = screen->logicalToPhysicalX(lx0);
+	const int py0 = screen->logicalToPhysicalY(ly0);
+	const int px1 = screen->logicalToPhysicalX(lx1);
+	const int py1 = screen->logicalToPhysicalY(ly1);
+	const int ph = std::max(1, py1 - py0);
+	const double cx = 0.5 * (px0 + px1);
+	const double cy = 0.5 * (py0 + py1);
+	const double radius = geoscapeHdProjectedRadiusPhysical(_globe, ph);
+	const bool insideViewport = (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP)
+		? (event.button.x >= px0 && event.button.x < px1 && event.button.y >= py0 && event.button.y < py1)
+		: false;
+
+	// GEOSCAPE HD CAMERA V6: wheel ownership moves to this same raw controller.
+	// Keep OXCE's discrete zoom state authoritative for savegames/UI/dogfight
+	// compatibility, but the renderer translates that radius into camera dolly.
+	if ((event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) &&
+		(event.button.button == SDL_BUTTON_WHEELUP || event.button.button == SDL_BUTTON_WHEELDOWN))
+	{
+		if (!insideViewport) return false;
+		if (event.type == SDL_MOUSEBUTTONDOWN)
+		{
+			if (event.button.button == SDL_BUTTON_WHEELUP) _globe->zoomIn();
+			else _globe->zoomOut();
+			Log(LOG_INFO) << "[GEOSCAPE HD CAMERA V6][WHEEL-DOLLY] zoom=" << _globe->getZoom()
+				<< " cameraDistance=" << geoscapeHdCameraDistance(_globe);
+		}
+		return true;
+	}
+
+	if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_RIGHT)
+	{
+		// HD owns RMB throughout the globe viewport. Even a RMB press outside the
+		// projected sphere is consumed here so it can never fall through to the
+		// Legacy right-click recenter/drag machinery. A drag starts only on Earth.
+		if (!insideViewport) return false;
+		const double dx = event.button.x - cx;
+		const double dy = event.button.y - cy;
+		if (dx*dx + dy*dy <= radius*radius*1.05)
+		{
+			_hdGlobeRawDrag = true;
+			_hdGlobeRawLastX = event.button.x;
+			_hdGlobeRawLastY = event.button.y;
+			_hdGlobeRawAccumX = _hdGlobeRawAccumY = 0;
+			_globe->rotateStop();
+			const double visibleDiameterPhysical = radius * 2.0;
+			Log(LOG_INFO) << "[GEOSCAPE HD CAMERA V6][RMB-DRAG-BEGIN] physical="
+				<< _hdGlobeRawLastX << "," << _hdGlobeRawLastY
+				<< " globeCenterPhysical=" << (int)cx << "," << (int)cy
+				<< " globeRadiusPhysical=" << radius
+				<< " targetHorizontal360px=" << visibleDiameterPhysical
+				<< " centerLon=" << _globe->getCenterLongitude()
+				<< " centerLat=" << _globe->getCenterLatitude();
+		}
+		return true;
+	}
+
+	if (event.type == SDL_MOUSEMOTION && _hdGlobeRawDrag)
+	{
+		if ((event.motion.state & SDL_BUTTON_RMASK) == 0)
+		{
+			cancelDrag("RMB_MASK_LOST");
+			return true;
+		}
+
+		const int dx = event.motion.x - _hdGlobeRawLastX;
+		const int dy = event.motion.y - _hdGlobeRawLastY;
+		_hdGlobeRawLastX = event.motion.x;
+		_hdGlobeRawLastY = event.motion.y;
+		_hdGlobeRawAccumX += dx;
+		_hdGlobeRawAccumY += dy;
+
+		// GEOSCAPE HD CAMERA V6: normalize both axes to one circular projected
+		// globe diameter.  The perspective camera owns aspect correction; input
+		// must never reintroduce separate X/Y globe scales.
+		const double diameter = std::max(64.0, radius * 2.0);
+		const double lonPerPixel = (2.0 * M_PI) / diameter;
+		const double latPerPixel = M_PI / diameter;
+		const double sign = Options::geoDragScrollInvert ? 1.0 : -1.0;
+		double lon = _globe->getCenterLongitude() + sign * (double)dx * lonPerPixel;
+		double lat = _globe->getCenterLatitude() + sign * (double)dy * latPerPixel;
+		const double latLimit = M_PI * 0.5 - 0.002;
+		lat = std::max(-latLimit, std::min(latLimit, lat));
+		while (lon < 0.0) lon += 2.0 * M_PI;
+		while (lon >= 2.0 * M_PI) lon -= 2.0 * M_PI;
+		_globe->center(lon, lat);
+		return true;
+	}
+
+	if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_RIGHT)
+	{
+		if (_hdGlobeRawDrag)
+		{
+			_hdGlobeRawDrag = false;
+			Log(LOG_INFO) << "[GEOSCAPE HD CAMERA V6][RMB-DRAG-END] deltaPhysical="
+				<< _hdGlobeRawAccumX << "," << _hdGlobeRawAccumY
+				<< " centerLon=" << _globe->getCenterLongitude()
+				<< " centerLat=" << _globe->getCenterLatitude();
+			_hdGlobeRawAccumX = _hdGlobeRawAccumY = 0;
+			return true;
+		}
+		// Pair with the RMB-down ownership rule above. Do not let an unmatched
+		// release inside the HD globe viewport awaken a Legacy click action.
+		return insideViewport;
+	}
+
+	return false;
+}
+
+/**
  * Handle key shortcuts.
  * @param action Pointer to an action.
  */
 void GeoscapeState::handle(Action *action)
 {
+	// GEOSCAPE HD INPUT OWNERSHIP V1: camera input is intentionally NOT handled
+	// through State/InteractiveSurface/Globe while HD mode is active. Game::run
+	// feeds owned raw events to handleHdGlobeRawEvent(); the Legacy camera path
+	// is retained only as an automatic fallback when HD mode is absent.
+
 	if (_dogfights.size() == _minimizedDogfights)
 	{
 		State::handle(action);
@@ -4840,7 +5181,23 @@ void GeoscapeState::resize(int &dX, int &dY)
 	_sideLine->setHeight(Options::baseYResolution);
 	_sideLine->setY(0);
 	_sideLine->drawRect(0, 0, _sideLine->getWidth(), _sideLine->getHeight(), 15);
+    if (Options::hdGraphics)
+    {
+        HdUiPicture line(_sideLine->getWidth(), _sideLine->getHeight());
+        line.fill(line.bounds(), 15); _sideLine->setHdPicture(line);
+    }
 	applyHdUiPresentationScale();
+	{
+		const PresentationContext &pc = _game->getScreen()->getPresentationContext();
+		Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][GEO-RESIZE] delta=" << dX << "," << dY
+			<< " base=" << Options::baseXResolution << "x" << Options::baseYResolution
+			<< " globe=" << _globe->getWidth() << "x" << _globe->getHeight()
+			<< " sidebarDisplay=" << _sidebar->getDisplayX() << "," << _sidebar->getDisplayY()
+			<< " uiScale=" << Options::getGeoUiScale()
+			<< " worldScaleOpt=" << Options::geoscapeScale
+			<< " pcLogical=" << pc.logicalWidth() << "x" << pc.logicalHeight()
+			<< " pcScale=" << pc.scaleX() << "x" << pc.scaleY();
+	}
 }
 bool GeoscapeState::buttonsDisabled()
 {

@@ -65,6 +65,10 @@ private:
 	std::vector<Craft*> _activeCrafts;
 	size_t _minimizedDogfights;
 	int _slowdownCounter;
+	// GEOSCAPE HD CAMERA V3: raw SDL drag state owned by Geoscape, fed directly by Game.
+	bool _hdGlobeRawDrag;
+	int _hdGlobeRawLastX, _hdGlobeRawLastY;
+	int _hdGlobeRawAccumX, _hdGlobeRawAccumY;
 
 	/// Update list of active crafts.
 	const std::vector<Craft*>* updateActiveCrafts();
@@ -84,10 +88,14 @@ public:
 	~GeoscapeState();
 	/// Handle keypresses.
 	void handle(Action *action) override;
+	/// GEOSCAPE HD CAMERA V3: raw SDL RMB-drag bypassing Legacy Globe input. Returns true when the event is consumed.
+	bool handleHdGlobeRawEvent(const SDL_Event &event);
 	/// Updates the palette and timer.
 	void init() override;
 	/// Runs the timer.
 	void think() override;
+	/// GEOSCAPE HD proof-of-life direct D3D11 globe presentation.
+	void blitPhysical(SDL_Surface *destination, Screen *screen, bool redrawLegacy) override;
 	/// Displays the game time/date. (+Funds)
 	void timeDisplay();
 	/// Advances the game timer.

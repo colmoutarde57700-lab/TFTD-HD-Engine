@@ -97,6 +97,10 @@ public:
 	void blink();
 	/// Draws the text edit.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
+private:
+	void drawContents(HdCanvas *canvas, HdImageCache *images);
+public:
 	/// Special handling for mouse presses.
 	void mousePress(Action *action, State *state) override;
 	/// Special handling for keyboard presses.

@@ -46,6 +46,7 @@ private:
 	// for use by RuleInterface
 	void setSecondaryColor(Uint8 color)  override { setTextColor(color); }
 protected:
+	void composeHdButton(HdCanvas &canvas, HdImageCache &images, int paletteInvertMid = -1);
 	bool isButtonHandled(Uint8 button = 0) override;
 public:
 	static Sound *soundPress;
@@ -79,6 +80,7 @@ public:
 	void setPalette(const SDL_Color *colors, int firstcolor = 0, int ncolors = 256) override;
 	/// Draws the text button.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Special handling for mouse presses.
 	void mousePress(Action *action, State *state) override;
 	/// Special handling for mouse releases.

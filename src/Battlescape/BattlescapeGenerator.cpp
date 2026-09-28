@@ -19,8 +19,10 @@
 #include <algorithm>
 #include <assert.h>
 #include <sstream>
+#include <set>
 #include "BattlescapeGenerator.h"
 #include "TileEngine.h"
+#include "BedrockRender.h"
 #include "Inventory.h"
 #include "AIModule.h"
 #include "../Savegame/SavedGame.h"
@@ -68,6 +70,54 @@ namespace OpenXcom
 
 namespace
 {
+
+struct RealHdMapDataProfile
+{
+	size_t totalEntries = 0;
+	std::string description;
+};
+
+RealHdMapDataProfile describeMapDataProfile(RuleTerrain *terrain)
+{
+	RealHdMapDataProfile out;
+	if (!terrain) return out;
+
+	std::ostringstream ss;
+	bool first = true;
+	for (MapDataSet *set : *terrain->getMapDataSets())
+	{
+		if (!set) continue;
+		if (!first) ss << ",";
+		ss << set->getName() << ":" << set->getSize();
+		out.totalEntries += set->getSize();
+		first = false;
+	}
+	out.description = ss.str();
+	return out;
+}
+
+const char *tilePartName(int part)
+{
+	switch ((TilePart)part)
+	{
+		case O_FLOOR: return "FLOOR";
+		case O_WESTWALL: return "WESTWALL";
+		case O_NORTHWALL: return "NORTHWALL";
+		case O_OBJECT: return "OBJECT";
+		default: return "UNKNOWN";
+	}
+}
+
+void logRealHdMapProfileOnce(RuleTerrain *terrain, const RealHdMapDataProfile &profile)
+{
+	if (!terrain) return;
+	static std::set<std::string> logged;
+	if (!logged.insert(terrain->getName()).second) return;
+	Log(LOG_INFO) << "[REAL-HD MAP PROFILE V1] terrain=" << terrain->getName()
+		<< " datasets=" << profile.description
+		<< " totalEntries=" << profile.totalEntries
+		<< " invalidRefPolicy=FAIL_FAST";
+}
 
 // New Battle / TFTD HD visual test roster: these labels are created only by
 // NewBattleState.  At deployment time we replace the alien-looking Soldier
@@ -803,7 +853,12 @@ void BattlescapeGenerator::nextStage()
 
 	if (unitCount == _save->getUnits()->size())
 	{
-		throw Exception("Map generator encountered an error: no alien units could be placed on the map.");
+		if (!_save->isTestEmptyHostileSandbox())
+		{
+			throw Exception("Map generator encountered an error: no alien units could be placed on the map.");
+		}
+		Log(LOG_INFO) << "[TEST-SANDBOX ZERO-ALIEN V1][GENERATOR] empty hostile deployment accepted"
+			<< " mission=" << _save->getMissionType();
 	}
 
 	// Normal case: deploy civilians after aliens
@@ -868,6 +923,12 @@ void BattlescapeGenerator::run()
 	{
 		throw Exception("Map generator encountered an error: No valid terrain found.");
 	}
+
+	// REAL-HD GLOBAL SAND POLICY V1: activation is derived from the terrain
+	// semantics actually selected by the generator, not from a test mission name.
+	// Any normal campaign/New Battle terrain that declares SAND may therefore use
+	// the continuous BEDROCK_SAND presentation while OXCE gameplay stays unchanged.
+	BedrockRenderPolicy::armFromTerrain(_save, _terrain, "primary-terrain");
 
 	setDepth(ruleDeploy, false);
 
@@ -981,7 +1042,12 @@ void BattlescapeGenerator::run()
 
 	if (!isPreview && unitCount == _save->getUnits()->size())
 	{
-		throw Exception("Map generator encountered an error: no alien units could be placed on the map.");
+		if (!_save->isTestEmptyHostileSandbox())
+		{
+			throw Exception("Map generator encountered an error: no alien units could be placed on the map.");
+		}
+		Log(LOG_INFO) << "[TEST-SANDBOX ZERO-ALIEN V1][GENERATOR] empty hostile deployment accepted"
+			<< " mission=" << _save->getMissionType();
 	}
 
 	// Normal case: deploy civilians after aliens
@@ -2212,6 +2278,22 @@ int BattlescapeGenerator::loadMAP(MapBlock *mapblock, int xoff, int yoff, int zo
 	std::string filename = "MAPS/" + mapblock->getName() + ".MAP";
 	unsigned int terrainObjectID;
 
+	// A MapScript may load a terrain different from the primary terrain. Observe
+	// every actual RuleTerrain before decoding its MAP so SAND can activate the
+	// semantic renderer even inside composite missions.
+	BedrockRenderPolicy::armFromTerrain(_save, terrain, "loadMAP");
+
+	// REAL-HD semantic rendering must never inherit the Legacy "broken MAP ref ->
+	// BLANKS 0" recovery silently. That fallback destroys the original semantic
+	// identity before the renderer can interpret it. Legacy missions keep the
+	// historical behavior; REAL-HD missions validate every non-zero reference.
+	// Strict REAL-HD MAP reference validation follows active presentation ownership,
+	// not merely semantic eligibility. If BEDROCK's MaterialSet/provider is absent,
+	// the mission must take the ordinary HD/Legacy compatibility path end-to-end.
+	const bool realHdStrictMapRefs = _save && BedrockRenderPolicy::resolve(_save) != BedrockMaterial::None;
+	const RealHdMapDataProfile realHdProfile = realHdStrictMapRefs ? describeMapDataProfile(terrain) : RealHdMapDataProfile();
+	if (realHdStrictMapRefs) logRealHdMapProfileOnce(terrain, realHdProfile);
+
 	// Load file
 	auto mapFile = FileMap::getIStream(filename);
 
@@ -2275,6 +2357,20 @@ int BattlescapeGenerator::loadMAP(MapBlock *mapblock, int xoff, int yoff, int zo
 			terrainObjectID = ((unsigned char)value[part]);
 			if (terrainObjectID>0)
 			{
+				if (realHdStrictMapRefs && terrainObjectID >= realHdProfile.totalEntries)
+				{
+					std::ostringstream error;
+					error << "REAL-HD invalid MAP reference: terrain=" << terrain->getName()
+						<< " map=" << mapblock->getName()
+						<< " part=" << tilePartName(part)
+						<< " raw=" << terrainObjectID
+						<< " pos=" << x << "," << y << "," << z
+						<< " validRange=1.." << (realHdProfile.totalEntries ? realHdProfile.totalEntries - 1 : 0)
+						<< " datasets=" << realHdProfile.description;
+					Log(LOG_ERROR) << "[REAL-HD MAP REF ERROR V1] " << error.str();
+					throw Exception(error.str());
+				}
+
 				int mapDataSetID = mapDataSetOffset;
 				unsigned int mapDataID = terrainObjectID;
 				MapData *md = terrain->getMapData(&mapDataID, &mapDataSetID);

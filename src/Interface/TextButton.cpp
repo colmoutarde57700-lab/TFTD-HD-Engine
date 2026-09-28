@@ -17,6 +17,7 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "TextButton.h"
+#include "../Engine/HdCanvas.h"
 #include <SDL.h>
 #include <SDL_mixer.h>
 #include "Text.h"
@@ -196,6 +197,58 @@ void TextButton::setPalette(const SDL_Color *colors, int firstcolor, int ncolors
  * Draws the labeled button.
  * The colors are inverted if the button is pressed.
  */
+void TextButton::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	composeHdButton(canvas, images);
+}
+
+void TextButton::composeHdButton(HdCanvas &canvas, HdImageCache &images, int paletteInvertMid)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas button(getWidth(), getHeight());
+	const int mul = _contrast ? 2 : 1;
+	const bool pressed = _group ? (*_group == this) : isButtonPressed();
+	const int mid = _color + (_geoscapeButton ? 2 : 3) * mul;
+	const auto rgba = [&](int value)
+	{
+		Uint8 index = static_cast<Uint8>(value);
+		if (pressed && index) index = static_cast<Uint8>(2 * mid - index);
+		if (paletteInvertMid >= 0 && index) index = static_cast<Uint8>(2 * paletteInvertMid - index);
+		return getHdColor(index);
+	};
+	double x = 0, y = 0, w = getWidth(), h = getHeight();
+	int color = _color + mul;
+	for (int i = 0; i < 5; ++i)
+	{
+		button.sourceRectangle({x, y, std::max(0.0, w), std::max(0.0, h)}, rgba(color));
+		if (i % 2 == 0) { ++x; ++y; }
+		--w; --h;
+		switch (i)
+		{
+		case 0:
+			color = _color + 5 * mul;
+			button.sourceRectangle({w, 0, 1, 1}, rgba(color));
+			break;
+		case 1: color = _color + 2 * mul; break;
+		case 2:
+			color = _color + 4 * mul;
+			button.sourceRectangle({w + 1, 1, 1, 1}, rgba(color));
+			break;
+		case 3: color = _color + 3 * mul; break;
+		case 4:
+			if (_geoscapeButton)
+			{
+				button.sourceRectangle({0, 0, 1, 1}, rgba(_color));
+				button.sourceRectangle({1, 1, 1, 1}, rgba(_color));
+			}
+			break;
+		}
+	}
+	_text->setInvert(pressed);
+	_text->composeHdWithPalette(button, images, paletteInvertMid);
+	composeHdLayer(canvas, button);
+}
+
 void TextButton::draw()
 {
 	Surface::draw();

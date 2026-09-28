@@ -46,6 +46,8 @@ public:
         int frame, x, y, shade, burn;
         GraphSubset mask;
         bool body;
+        int baseColor = 0;
+        bool hasMask = true;
     };
     using LayerRenderer = std::function<void(const RenderLayer &, const std::function<void()> &)>;
     void setLayerRenderer(const LayerRenderer &renderer) { _layerRenderer = renderer; }

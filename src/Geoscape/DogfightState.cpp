@@ -17,6 +17,7 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "DogfightState.h"
+#include "HdCraftIndicator.h"
 #include <cmath>
 #include <sstream>
 #include "GeoscapeState.h"
@@ -25,6 +26,7 @@
 #include "../Engine/LocalizedText.h"
 #include "../Engine/SurfaceSet.h"
 #include "../Engine/Surface.h"
+#include "../Engine/HdUiPicture.h"
 #include "../Engine/Action.h"
 #include "../Interface/ImageButton.h"
 #include "../Interface/Text.h"
@@ -341,9 +343,12 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 		_range[i] = new Surface(21, 74, _x + r_off, _y + 3);
 		_txtAmmo[i] = new Text(16, 9, _x + w_off, _y + y_off + 18);
 	}
-	_craftSprite = new Surface(22, 25, _x + 93, _y + 40);
-	_damage = new Surface(22, 25, _x + 93, _y + 40);
-	_craftShield = new Surface(22, 25, _x + 93, _y + 40);
+	_craftSprite = new HdCraftIndicator(22, 25, _x + 93, _y + 40, _craft, HdCraftIndicatorPart::Hull,
+		&_currentCraftDamageColor, &_colors[SHIELD_MIN], &_colors[SHIELD_MAX], &_colors[CRAFT_MIN]);
+	_damage = new HdCraftIndicator(22, 25, _x + 93, _y + 40, _craft, HdCraftIndicatorPart::Damage,
+		&_currentCraftDamageColor, &_colors[SHIELD_MIN], &_colors[SHIELD_MAX], &_colors[CRAFT_MIN]);
+	_craftShield = new HdCraftIndicator(22, 25, _x + 93, _y + 40, _craft, HdCraftIndicatorPart::Shield,
+		&_currentCraftDamageColor, &_colors[SHIELD_MIN], &_colors[SHIELD_MAX], &_colors[CRAFT_MIN]);
 
 	_btnMinimize = new InteractiveSurface(12, 12, _x, _y);
 	_preview = new InteractiveSurface(160, 96, _x, _y);
@@ -414,6 +419,9 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 	crop.getCrop()->h = _window->getHeight();
 	_window->drawRect(crop.getCrop(), 15);
 	crop.blit(_window);
+	HdUiPicture hdWindow(_window->getWidth(), _window->getHeight());
+	hdWindow.fill(hdWindow.bounds(), 15);
+	if (Options::hdGraphics) hdWindow.image(hdUiScreenDefinition("INTERWIN.DAT", 160, 600), hdWindow.bounds(), hdWindow.bounds());
 
 	if (_ufoIsAttacking || _missileCraft)
 	{
@@ -450,6 +458,9 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 			dogfightInterface->getElement("minimizeButtonDummy")->color + 4);
 	}
 
+	if (Options::hdGraphics) refreshHdPreview();
+	else
+	{
 	_preview->drawRect(crop.getCrop(), 15);
 	crop.getCrop()->y = dogfightInterface->getElement("previewTop")->y;
 	crop.getCrop()->h = dogfightInterface->getElement("previewTop")->h;
@@ -471,6 +482,8 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 	crop.setX(dogfightInterface->getElement("previewTop")->x);
 	crop.setY(dogfightInterface->getElement("previewTop")->h);
 	crop.blit(_preview);
+
+	}
 
 	_preview->setVisible(false);
 	_preview->onMouseClick((ActionHandler)&DogfightState::previewClick);
@@ -514,6 +527,35 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 
 	_btnUfo->copy(_window);
 	_btnUfo->onMouseClick((ActionHandler)&DogfightState::btnUfoClick);
+	// These enabled controls crop the resource picture, not _window's raster.
+	// Disabled controls remain hidden; the disabled panel regions below are
+	// an explicit HD layout operation rather than a copy of their old pixels.
+	const auto bindButton = [&](ImageButton *button, bool disabled, const char *element)
+	{
+		if (!Options::hdGraphics) return;
+		const HdRect area{double(button->getX() - _window->getX()),
+			double(button->getY() - _window->getY()), double(button->getWidth()), double(button->getHeight())};
+		button->setHdPicture(hdWindow.cropped(area));
+		if (disabled)
+			hdWindow.fill({area.x + 2, area.y + 2, area.w - 4, area.h - 4},
+				static_cast<Uint8>(dogfightInterface->getElement(element)->color + 4));
+	};
+	const bool disableModes = _ufoIsAttacking || _missileCraft;
+	bindButton(_btnStandoff, disableModes && _disableStandoff, "standoffButton");
+	bindButton(_btnCautious, disableModes && _disableCautious, "cautiousButton");
+	bindButton(_btnStandard, disableModes && _disableStandard, "standardButton");
+	bindButton(_btnAggressive, disableModes && _disableAggressive, "aggressiveButton");
+	bindButton(_btnDisengage, disableModes && _disableDisengage, "disengageButton");
+	bindButton(_btnUfo, false, "ufoButton");
+	if (_ufoIsAttacking)
+	{
+		const int offset = dogfightInterface->getElement("minimizeButtonDummy")->TFTDMode ? 1 : 0;
+		hdWindow.fill({double(_btnMinimize->getX() - _window->getX() + 1 + offset),
+			double(_btnMinimize->getY() - _window->getY() + 1),
+			double(_btnMinimize->getWidth() - 2 - offset), double(_btnMinimize->getHeight() - 2)},
+			static_cast<Uint8>(dogfightInterface->getElement("minimizeButtonDummy")->color + 4));
+	}
+	if (Options::hdGraphics) _window->setHdPicture(hdWindow);
 
 	_txtDistance->setText("640");
 	updateOceanIndicator();
@@ -523,11 +565,21 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 	else
 		_txtStatus->setText(tr("STR_STANDOFF"));
 
-	SurfaceSet *set = _game->getMod()->getSurfaceSet("INTICON.PCK");
+	SurfaceSet *set = Options::hdGraphics ? nullptr : _game->getMod()->getSurfaceSet("INTICON.PCK");
 
 	// Create the minimized dogfight icon.
-	Surface *frame = set->getFrame(_craft->getSkinSprite());
-	frame->blitNShade(_btnMinimizedIcon, 0, 0);
+	Surface *frame = nullptr;
+	if (Options::hdGraphics)
+	{
+		HdUiPicture icon(_btnMinimizedIcon->getWidth(), _btnMinimizedIcon->getHeight());
+		icon.image(hdUiFrameDefinition("INTICON.PCK", _craft->getSkinSprite(), 32, 40), {0, 0, 32, 40}, {0, 0, 32, 40});
+		_btnMinimizedIcon->setHdPicture(icon);
+	}
+	else
+	{
+		frame = set->getFrame(_craft->getSkinSprite());
+		frame->blitNShade(_btnMinimizedIcon, 0, 0);
+	}
 	_btnMinimizedIcon->onMouseClick((ActionHandler)&DogfightState::btnMinimizedIconClick);
 	_btnMinimizedIcon->setVisible(false);
 
@@ -591,8 +643,17 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 		}
 
 		// Draw icon
-		frame = set->getFrame(w->getRules()->getSprite() + 5);
-		frame->blitNShade(weapon, 0, 0);
+		if (Options::hdGraphics)
+		{
+			HdUiPicture icon(weapon->getWidth(), weapon->getHeight());
+			icon.image(hdUiFrameDefinition("INTICON.PCK", w->getRules()->getSprite() + 5, 32, 40), {0, 0, 32, 40}, {0, 0, 32, 40});
+			weapon->setHdPicture(icon);
+		}
+		else
+		{
+			frame = set->getFrame(w->getRules()->getSprite() + 5);
+			frame->blitNShade(weapon, 0, 0);
+		}
 
 		// Just an equipment, it doesn't have any ammo (weapon) or range (tractor beam), skip!
 		if (w->getRules()->getAmmoMax() == 0 && w->getRules()->getTractorBeamPower() == 0)
@@ -614,6 +675,8 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 		// Draw range (1 km = 1 pixel)
 		// Only relevant for weapons and tractor beams.
 		Uint8 color = _colors[RANGE_METER];
+		if (!Options::hdGraphics)
+		{
 		range->lock();
 
 		int rangeY = range->getHeight() - w->getRules()->getRange();
@@ -643,6 +706,7 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 			range->setPixel(x, connectY, color);
 		}
 		range->unlock();
+		}
 	}
 
 	for (int i = 0; i < _weaponNum; ++i)
@@ -656,8 +720,11 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 	}
 
 	// Draw damage indicator.
-	frame = set->getFrame(_craft->getSkinSprite() + 11);
-	frame->blitNShade(_craftSprite, 0, 0);
+	if (!Options::hdGraphics)
+	{
+		frame = set->getFrame(_craft->getSkinSprite() + 11);
+		frame->blitNShade(_craftSprite, 0, 0);
+	}
 
 	_craftDamageAnimTimer->onTimer((StateHandler)&DogfightState::animateCraftDamage);
 
@@ -698,7 +765,7 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 	_ufoSize = std::min(_ufoBlobSize, 4); // yes, maximum supported is 4, not a typo
 
 	// Get crafts height. Used for damage indication.
-	for (int y = 0; y < _craftSprite->getHeight(); ++y)
+	for (int y = 0; !Options::hdGraphics && y < _craftSprite->getHeight(); ++y)
 	{
 		for (int x = 0; x < _craftSprite->getWidth(); ++x)
 		{
@@ -719,6 +786,12 @@ DogfightState::DogfightState(GeoscapeState *state, Craft *craft, Ufo *ufo, bool 
 	{
 		_ufo->setShieldRechargeHandle(_interceptionNumber);
 	}
+	if (Options::hdGraphics)
+		for (int i = 0; i < _weaponNum; ++i)
+		{
+			_hdAmmoBaseColors[i] = _txtAmmo[i]->getColor();
+			refreshHdWeapon(i, _weaponEnabled[i]);
+		}
 }
 
 /**
@@ -817,6 +890,7 @@ void DogfightState::drawCraftDamage()
 				_currentCraftDamageColor = _colors[DAMAGE_MIN];
 			}
 		}
+		if (Options::hdGraphics) return; // HD presenter reads game facts and the selected PNG alpha.
 		int damagePercentage = _craft->getDamagePercentage();
 		int rowsToColor = (int)floor((double)_craftHeight * (double)(damagePercentage / 100.));
 		if (rowsToColor == 0)
@@ -855,6 +929,7 @@ void DogfightState::drawCraftDamage()
  */
 void DogfightState::drawCraftShield()
 {
+	if (Options::hdGraphics) return;
 	if (_craft->getShieldCapacity() == 0)
 		return;
 
@@ -888,6 +963,11 @@ void DogfightState::drawCraftShield()
  */
 void DogfightState::animate()
 {
+    if (Options::hdGraphics)
+    {
+        _window->setHdNativeFallback("Dogfight radar wave material not migrated; use animated native panel");
+        _battle->setHdNativeFallback("Dogfight UFO/projectiles/beams/shields require native radar composition");
+    }
 	// Animate radar waves and other stuff.
 	for (int x = 0; x < _window->getWidth(); ++x)
 	{
@@ -2394,6 +2474,11 @@ void DogfightState::weaponClick(Action * a)
  */
 void DogfightState::recolor(const int weaponNo, const bool currentState)
 {
+	if (Options::hdGraphics)
+	{
+		refreshHdWeapon(weaponNo, currentState);
+		return;
+	}
 	InteractiveSurface *weapon = _weapon[weaponNo];
 	Text *ammo = _txtAmmo[weaponNo];
 	Surface *range = _range[weaponNo];

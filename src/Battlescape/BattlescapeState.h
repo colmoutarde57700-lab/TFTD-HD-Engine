@@ -18,6 +18,7 @@
  * along with OpenXcom.  If not, see <http:///www.gnu.org/licenses/>.
  */
 #include "../Engine/State.h"
+#include "../Engine/PresentationSpaces.h"
 #include "Position.h"
 
 #include <vector>
@@ -83,6 +84,13 @@ private:
 	Timer *_animTimer, *_gameTimer;
 	SavedBattleGame *_save;
 	Text *_txtDebug, *_txtTooltip;
+	Uint32 _hdDebugLastRefresh = 0;
+	bool _hdDebugHasSample = false;
+	std::string _hdGpuDebugText;
+	int _hdTunePage = -1; // -1 closed; 0 material, 1 light, 2 FOV
+	int _hdTuneRow = 0;
+	int _hdCausticTab = 0;
+	bool hdUiMigrationEnabled() const override { return true; }
 	Uint8 _tooltipDefaultColor;
 	Uint8 _medikitRed, _medikitGreen, _medikitBlue, _medikitOrange;
 	std::vector<State*> _popups;
@@ -103,11 +111,15 @@ private:
 	Uint8 _indicatorTextColor, _indicatorGreen, _indicatorBlue, _indicatorPurple;
 	/// Applies presentation-only scaling/opacity to the tactical HUD while leaving the map at 1x.
 	void updateUiScaleTransforms();
+	bool isBattleUiRootCutoverSurface(Surface *surface) const;
+	bool getBattleUiCanonicalRect(Surface *surface, PresentationRect &rect) const;
+	void updateBattleUiViewportReservation();
+	void updateBattleUiInputTransforms();
 	void toggleHud();
 	/// Returns true when the HUD is user-hidden or temporarily suppressed outside the player turn.
 	bool isHudEffectivelyHidden() const;
 	/// Popups a context sensitive list of actions the user can choose from.
-	void handleItemClick(BattleItem *item, bool rightClick);
+	void handleItemClick(BattleItem *item, bool middleClick, bool rightSide);
 	/// Shifts the red colors of the visible unit buttons backgrounds.
 	void blinkVisibleUnitButtons();
 	/// Draw hand item with ammo number.

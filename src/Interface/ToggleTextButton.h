@@ -35,6 +35,7 @@ private:
 public:
 
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	void mousePress(Action *action, State *state) override;
 	void setPressed(bool pressed);
 	bool getPressed() const { return _isPressed; }

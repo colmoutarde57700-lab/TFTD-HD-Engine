@@ -53,6 +53,7 @@ public:
 	void update();
 	/// Draws the FPS counter.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	void addFrame();
 };
 

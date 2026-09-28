@@ -17,6 +17,7 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "VideoState.h"
+#include "../Engine/HdRenderTrace.h"
 #include <algorithm>
 #include <SDL_mixer.h>
 #include "../Engine/Adlib/adlplayer.h"
@@ -506,7 +507,22 @@ void VideoState::init()
 	}
 #endif
 
-	if (fade)
+	if (fade && Options::hdGraphics && _game->getScreen()->hasHdCanvas())
+	{
+		for (int i = FADE_STEPS; i > 0; --i)
+		{
+			SDL_Event event;
+			if (SDL_PollEvent(&event) && event.type == SDL_KEYDOWN) break;
+            try { _game->getScreen()->fadeHdCanvas(double(i) / FADE_STEPS); }
+            catch (const std::exception &error)
+            {
+                hdTraceRoute("cinematic-fade", "end", "LEGACY_NATIVE", error.what(), true);
+                _game->getScreen()->discardHdCanvas(); break;
+            }
+			SDL_Delay(FADE_DELAY);
+		}
+	}
+	else if (fade)
 	{
 		SDL_Color pal[256];
 		SDL_Color pal2[256];
@@ -527,8 +543,18 @@ void VideoState::init()
 			SDL_Delay(FADE_DELAY);
 		}
 	}
-	_game->getScreen()->clear();
-	_game->getScreen()->flip();
+    bool cleared = false;
+    if (Options::hdGraphics)
+    {
+        try { _game->getScreen()->clearHdCanvas(); cleared = true; }
+        catch (const std::exception &error)
+        { hdTraceRoute("cinematic-clear", "end", "LEGACY_NATIVE", error.what(), true); }
+    }
+    if (!cleared)
+    {
+        _game->getScreen()->discardHdCanvas();
+        _game->getScreen()->clear(); _game->getScreen()->flip();
+    }
 
 	if (_useUfoAudioSequence)
 	{

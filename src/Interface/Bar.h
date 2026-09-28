@@ -67,6 +67,7 @@ public:
 	void setSecondValueOnTop(bool onTop);
 	/// Draws the bar.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// set the outline color for the bar.
 	void setBorderColor(Uint8 bc) override;
 };

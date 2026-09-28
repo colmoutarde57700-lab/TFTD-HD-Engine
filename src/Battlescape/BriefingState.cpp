@@ -278,8 +278,14 @@ void BriefingState::btnOkClick(Action *)
 	BattlescapeState *bs = new BattlescapeState;
 	bs->getBattleGame()->spawnFromPrimedItems();
 	BattlescapeTally tally = bs->getBattleGame()->tallyUnits();
-	bool isPreview = _game->getSavedGame()->getSavedBattle()->isPreview();
-	if (tally.liveAliens > 0 || isPreview)
+	SavedBattleGame *battleSave = _game->getSavedGame()->getSavedBattle();
+	bool isPreview = battleSave->isPreview();
+	const bool testEmptyHostileSandbox = battleSave->isTestEmptyHostileSandbox();
+	Log(LOG_INFO) << "[TEST-SANDBOX ZERO-ALIEN V1][BRIEFING] active=" << (testEmptyHostileSandbox ? 1 : 0)
+		<< " mission=" << battleSave->getMissionType()
+		<< " liveAliens=" << tally.liveAliens
+		<< " preview=" << (isPreview ? 1 : 0);
+	if (tally.liveAliens > 0 || isPreview || testEmptyHostileSandbox)
 	{
 		_game->pushState(bs);
 		_game->getSavedGame()->getSavedBattle()->setBattleState(bs);

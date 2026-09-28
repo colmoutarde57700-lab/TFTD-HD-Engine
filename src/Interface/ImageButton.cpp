@@ -18,6 +18,7 @@
  */
 #include "ImageButton.h"
 #include "../Engine/Action.h"
+#include "../Engine/HdCanvas.h"
 
 namespace OpenXcom
 {
@@ -115,6 +116,16 @@ void ImageButton::mouseRelease(Action *action, State *state)
  * Invert a button explicitly either ON or OFF and keep track of the state using our internal variables.
  * @param press Set this button as pressed.
  */
+void ImageButton::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas content(getWidth(), getHeight());
+	const bool pressed = _group ? *_group == this : _inverted;
+	composeHdBackdrop(content, images, content.bounds(), content.bounds(),
+		pressed ? hdUiInvertPalette(static_cast<Uint8>(_color + 3)) : hdUiIdentityPalette());
+	composeHdLayer(canvas, content);
+}
+
 void ImageButton::toggle(bool press)
 {
 	if (_inverted != press)

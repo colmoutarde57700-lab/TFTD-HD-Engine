@@ -17,6 +17,10 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "Globe.h"
+#include "GeoscapeHdMode.h"
+#include "../Engine/HdGpuBackend.h"
+#include "../Engine/FileMap.h"
+#include "../Engine/Options.h"
 #include "../fmath.h"
 #include "../Engine/Action.h"
 #include "../Engine/SurfaceSet.h"
@@ -56,6 +60,24 @@
 
 namespace OpenXcom
 {
+
+namespace
+{
+bool geoscapeHdPresentationActive()
+{
+    // Rendering may fall back on a transient frame if the GPU backend is not
+    // ready. Camera INPUT ownership does not: see geoscapeHdModeActive().
+    return !geoscapeNativePresentationRequested() && geoscapeHdModeActive() && HdGpuBackend::instance().directWorldReady();
+}
+
+Uint8 geoscapeDragButton()
+{
+    // Legacy-only camera drag binding. In HD mode this value must never start
+    // Globe::_isMouseScrolling; GeoscapeState owns camera input instead.
+    return (Uint8)Options::geoDragScrollButton;
+}
+}
+
 
 const double Globe::ROTATE_LONGITUDE = 0.10;
 const double Globe::ROTATE_LATITUDE = 0.06;
@@ -965,6 +987,17 @@ void Globe::draw()
 		cachePolygons();
 	}
 	Surface::draw();
+
+	// GEOSCAPE HD PROOF OF LIFE V1
+	// When the authored 3D Earth provider is present the Legacy globe body is
+	// deliberately not rasterized. Input, longitude/latitude, zoom and all
+	// Geoscape gameplay remain owned by OXCE; only globe presentation is
+	// replaced in the later D3D11 physical pass.
+	if (geoscapeHdPresentationActive())
+	{
+		return;
+	}
+
 	drawOcean();
 	drawLand();
 	drawRadars();
@@ -1805,6 +1838,30 @@ void Globe::drawMarkers()
  */
 void Globe::blit(SDL_Surface *surface)
 {
+	// GEOSCAPE HD PROOF OF LIFE V1 R2:
+	// A mod/provider can become available after the Legacy Globe surface has
+	// already been rasterized.  Surface::blit() would then happily reuse those
+	// stale indexed pixels because the surface is no longer marked for redraw.
+	// Force the Globe canvas transparent while the authored 3D provider owns the
+	// presentation so no yellow/blue Legacy rim can survive behind the mesh.
+	static bool wasHdProof = false;
+	const bool hdProof = geoscapeHdPresentationActive();
+	if (hdProof)
+	{
+		clear();
+		Surface::blit(surface);
+		wasHdProof = true;
+		return;
+	}
+
+	// If the provider is removed/reloaded at runtime, force one proper Legacy
+	// redraw rather than leaving the Globe canvas transparent.
+	if (wasHdProof)
+	{
+		invalidate();
+		wasHdProof = false;
+	}
+
 	Surface::blit(surface);
 	_radars->blit(surface);
 	_countries->blit(surface);
@@ -1818,6 +1875,19 @@ void Globe::blit(SDL_Surface *surface)
  */
 void Globe::mouseOver(Action *action, State *state)
 {
+	// GEOSCAPE HD INPUT OWNERSHIP V1: hard boundary. When HD mode owns the
+	// camera, none of the Legacy drag-scroll state machine below is allowed to
+	// execute (no threshold logic, no ROTATE_* deltas, no cursor warp).
+	if (geoscapeHdModeActive())
+	{
+		_isMouseScrolled = _isMouseScrolling = false;
+		double hdLon, hdLat;
+		cartToPolar((Sint16)floor(action->getAbsoluteXMouse()), (Sint16)floor(action->getAbsoluteYMouse()), &hdLon, &hdLat);
+		if (hdLat == hdLat && hdLon == hdLon) InteractiveSurface::mouseOver(action, state);
+		return;
+	}
+
+
 	double lon, lat;
 	cartToPolar((Sint16)floor(action->getAbsoluteXMouse()), (Sint16)floor(action->getAbsoluteYMouse()), &lon, &lat);
 
@@ -1827,7 +1897,7 @@ void Globe::mouseOver(Action *action, State *state)
 		// the mouse-release event is missed for any reason.
 		// (checking: is the dragScroll-mouse-button still pressed?)
 		// However if the SDL is also missed the release event, then it is to no avail :(
-		if (0 == (SDL_GetMouseState(0, 0)&SDL_BUTTON(Options::geoDragScrollButton)))
+		if (0 == (SDL_GetMouseState(0, 0)&SDL_BUTTON(geoscapeDragButton())))
 		{ // so we missed again the mouse-release :(
 			// Check if we have to revoke the scrolling, because it was too short in time, so it was a click
 			if ((!_mouseMovedOverThreshold) && ((int)(SDL_GetTicks() - _mouseScrollingStartTime) <= (Options::dragScrollTimeTolerance)))
@@ -1856,7 +1926,7 @@ void Globe::mouseOver(Action *action, State *state)
 		if (!_mouseMovedOverThreshold)
 			_mouseMovedOverThreshold = ((std::abs(_totalMouseMoveX) > Options::dragScrollPixelTolerance) || (std::abs(_totalMouseMoveY) > Options::dragScrollPixelTolerance));
 
-		// Scrolling
+		// Scrolling (Legacy-only). HD presentation never enters this camera path.
 		if (Options::geoDragScrollInvert)
 		{
 			double newLon = ((double)_totalMouseMoveX / action->getXScale()) * ROTATE_LONGITUDE/(_zoom+1)/2;
@@ -1905,7 +1975,9 @@ void Globe::mousePress(Action *action, State *state)
 	double lon, lat;
 	cartToPolar((Sint16)floor(action->getAbsoluteXMouse()), (Sint16)floor(action->getAbsoluteYMouse()), &lon, &lat);
 
-	if (action->getDetails()->button.button == Options::geoDragScrollButton)
+	// HD mode may still use this surface for strategic left-click plumbing, but
+	// its Legacy camera state machine is forbidden from starting.
+	if (!geoscapeHdModeActive() && action->getDetails()->button.button == geoscapeDragButton())
 	{
 		_isMouseScrolling = true;
 		_isMouseScrolled = false;
@@ -1932,7 +2004,8 @@ void Globe::mouseRelease(Action *action, State *state)
 {
 	double lon, lat;
 	cartToPolar((Sint16)floor(action->getAbsoluteXMouse()), (Sint16)floor(action->getAbsoluteYMouse()), &lon, &lat);
-	if (action->getDetails()->button.button == Options::geoDragScrollButton)
+	// Matching hard boundary: never invoke Legacy stopScrolling()/warp in HD mode.
+	if (!geoscapeHdModeActive() && action->getDetails()->button.button == geoscapeDragButton())
 	{
 		stopScrolling(action);
 	}
@@ -1951,6 +2024,21 @@ void Globe::mouseRelease(Action *action, State *state)
  */
 void Globe::mouseClick(Action *action, State *state)
 {
+	double lon, lat;
+	cartToPolar((Sint16)floor(action->getAbsoluteXMouse()), (Sint16)floor(action->getAbsoluteYMouse()), &lon, &lat);
+
+	if (geoscapeHdModeActive())
+	{
+		// RMB + wheel belong to GeoscapeState::handleHdGlobeRawEvent(). MMB has
+		// no HD camera meaning. Preserve only strategic LMB click dispatch here.
+		if (action->getDetails()->button.button == SDL_BUTTON_LEFT && lat == lat && lon == lon)
+		{
+			InteractiveSurface::mouseClick(action, state);
+		}
+		return;
+	}
+
+	// Legacy mode below is intentionally the historical OpenXcom/OXCE path.
 	if (action->getDetails()->button.button == SDL_BUTTON_WHEELUP)
 	{
 		zoomIn();
@@ -1960,17 +2048,14 @@ void Globe::mouseClick(Action *action, State *state)
 		zoomOut();
 	}
 
-	double lon, lat;
-	cartToPolar((Sint16)floor(action->getAbsoluteXMouse()), (Sint16)floor(action->getAbsoluteYMouse()), &lon, &lat);
-
 	// The following is the workaround for a rare problem where sometimes
 	// the mouse-release event is missed for any reason.
 	// However if the SDL is also missed the release event, then it is to no avail :(
 	// (this part handles the release if it is missed and now an other button is used)
 	if (_isMouseScrolling)
 	{
-		if (action->getDetails()->button.button != Options::geoDragScrollButton
-			&& 0 == (SDL_GetMouseState(0, 0)&SDL_BUTTON(Options::geoDragScrollButton)))
+		if (action->getDetails()->button.button != geoscapeDragButton()
+			&& 0 == (SDL_GetMouseState(0, 0)&SDL_BUTTON(geoscapeDragButton())))
 		{ // so we missed again the mouse-release :(
 			// Check if we have to revoke the scrolling, because it was too short in time, so it was a click
 			if ((!_mouseMovedOverThreshold) && ((int)(SDL_GetTicks() - _mouseScrollingStartTime) <= (Options::dragScrollTimeTolerance)))
@@ -1986,7 +2071,7 @@ void Globe::mouseClick(Action *action, State *state)
 	if (_isMouseScrolling)
 	{
 		// While scrolling, other buttons are ineffective
-		if (action->getDetails()->button.button == Options::geoDragScrollButton)
+		if (action->getDetails()->button.button == geoscapeDragButton())
 		{
 			_isMouseScrolling = false;
 			stopScrolling(action);
@@ -2141,6 +2226,13 @@ void Globe::setupRadii(int width, int height)
  */
 void Globe::stopScrolling(Action *action)
 {
+	if (geoscapeHdModeActive())
+	{
+		// Fail-safe: even if a stale Legacy path reaches this helper after an
+		// HD-mode transition, never warp the cursor or restore Legacy drag state.
+		_isMouseScrolled = _isMouseScrolling = false;
+		return;
+	}
 	SDL_WarpMouse(_xBeforeMouseScrolling, _yBeforeMouseScrolling);
 	action->setMouseAction(_xBeforeMouseScrolling, _yBeforeMouseScrolling, getX(), getY());
 }

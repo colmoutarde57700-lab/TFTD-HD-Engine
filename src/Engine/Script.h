@@ -386,7 +386,9 @@ struct TypeInfo
 class ScriptContainerBase
 {
 	friend struct ParserWriter;
+	friend class ScriptParserBase;
 	std::vector<Uint8> _proc;
+	bool _defaultProgram = false;
 
 public:
 	/// Constructor.
@@ -415,6 +417,7 @@ public:
 	{
 		return *this ? _proc.data() : nullptr;
 	}
+	bool isDefaultProgram() const { return _defaultProgram && !_proc.empty(); }
 };
 
 /**
@@ -461,6 +464,12 @@ public:
 	const ScriptContainerBase* dataEvents() const
 	{
 		return _events;
+	}
+	// Provenance, not an evaluation of the script. The two empty sentinels
+	// delimit pre/post events; any event requires an explicit HD adapter.
+	bool isDefaultWithoutEvents() const
+	{
+		return _current.isDefaultProgram() && (!_events || (!bool(_events[0]) && !bool(_events[1])));
 	}
 };
 

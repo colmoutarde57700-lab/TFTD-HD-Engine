@@ -61,6 +61,7 @@ public:
 	MiniMapView(int w, int h, int x, int y, Game * game, Camera * camera, SavedBattleGame * battleGame);
 	/// Draws the minimap.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Changes the displayed minimap level.
 	int up();
 	/// Changes the displayed minimap level.

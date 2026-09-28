@@ -263,6 +263,17 @@ int Slider::getValue() const
  * Blits the slider contents
  * @param surface Pointer to surface to blit onto.
  */
+void Slider::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	// These children already carry absolute layout and presentation transforms.
+	// Applying the parent's transform again would move and scale them twice.
+	_txtMinus->composeHd(canvas, images);
+	_txtPlus->composeHd(canvas, images);
+	_frame->composeHd(canvas, images);
+	_button->composeHd(canvas, images);
+}
+
 void Slider::blit(SDL_Surface *surface)
 {
 	Surface::blit(surface);

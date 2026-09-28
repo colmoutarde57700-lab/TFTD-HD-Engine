@@ -20,6 +20,7 @@
 #include <cmath>
 #include <SDL.h>
 #include "../Engine/Action.h"
+#include "../Engine/HdCanvas.h"
 
 namespace OpenXcom
 {
@@ -81,6 +82,20 @@ Uint8 Cursor::getColor() const
 /**
  * Draws a pointer-shaped cursor graphic.
  */
+void Cursor::composeHd(HdCanvas &canvas, HdImageCache &)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas cursor(getWidth(), getHeight());
+	for (int i = 0; i < 4; ++i)
+	{
+		const HdRgba color = getHdColor(static_cast<Uint8>(_color + i));
+		cursor.line({i + 0.5, i * 2 + 0.5}, {i + 0.5, getHeight() - i - 0.5}, 1.0, color);
+		cursor.line({i + 0.5, i * 2 + 0.5}, {getWidth() - i - 0.5, getWidth() - 0.5}, 1.0, color);
+	}
+	cursor.sourceRectangle({4, 8, 1, 1}, getHdColor(static_cast<Uint8>(_color + 3)));
+	composeHdLayer(canvas, cursor);
+}
+
 void Cursor::draw()
 {
 	Surface::draw();

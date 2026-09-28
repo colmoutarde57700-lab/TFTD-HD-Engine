@@ -23,6 +23,8 @@
 #include "../Engine/Timer.h"
 #include "../Engine/Sound.h"
 #include "../Engine/RNG.h"
+#include "../Engine/Exception.h"
+#include "../Engine/HdUiBadge.h"
 
 namespace OpenXcom
 {
@@ -75,9 +77,11 @@ Window::~Window()
  * Changes the surface used to draw the background of the window.
  * @param bg New background.
  */
-void Window::setBackground(const Surface *bg)
+void Window::setBackground(const Surface *bg, const std::string &imageId)
 {
 	_bg = bg;
+	_hdBackgroundId = !imageId.empty() ? imageId : (bg ? bg->getHdResourceId() : std::string{});
+	_hdBackground = HdUiImageDefinition{};
 	_redraw = true;
 }
 
@@ -161,6 +165,85 @@ void Window::popup()
  * always aligned to the top-left corner of the screen
  * and cropped to fit the inside area.
  */
+void Window::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas window(getWidth(), getHeight());
+	composeHdContents(window, images, hdUiIdentityPalette());
+	if (_popupStep >= 1.0) hdAppendPipelineBadge(window);
+	composeHdLayer(canvas, window);
+}
+
+void Window::composeHdBackdrop(HdCanvas &canvas, HdImageCache &images,
+	HdRect source, HdRect destination, const HdUiIndexMap &paletteMap) const
+{
+	if (!source.finite() || !destination.finite() || source.w < 0 || source.h < 0 ||
+		destination.w < 0 || destination.h < 0)
+		throw Exception("[HD UI ERROR] Invalid window backdrop crop");
+	if (source.empty() || destination.empty()) return;
+	HdCanvas window(getWidth(), getHeight());
+	composeHdContents(window, images, paletteMap);
+	HdCanvas region(source.w, source.h);
+	region.composite(window, {-source.x, -source.y, 1, 1});
+	canvas.composite(region, {destination.x, destination.y, destination.w / source.w, destination.h / source.h});
+}
+
+void Window::composeHdContents(HdCanvas &window, HdImageCache &images, const HdUiIndexMap &paletteMap) const
+{
+	const bool horizontal = _popup == POPUP_HORIZONTAL || _popup == POPUP_BOTH;
+	const bool vertical = _popup == POPUP_VERTICAL || _popup == POPUP_BOTH;
+	const double step = std::max(0.0, std::min(1.0, _popupStep));
+	HdRect square{
+		double(horizontal ? int((getWidth() - getWidth() * step) / 2) : 0),
+		double(vertical ? int((getHeight() - getHeight() * step) / 2) : 0),
+		double(horizontal ? int(getWidth() * step) : getWidth()),
+		double(vertical ? int(getHeight() * step) : getHeight())};
+	if (square.empty()) return;
+	const int mul = _contrast ? 2 : 1;
+	const auto rect = [&](HdRect bounds, int color)
+	{
+		bounds.w = std::max(0.0, bounds.w); bounds.h = std::max(0.0, bounds.h);
+		window.sourceRectangle(bounds, getHdColor(paletteMap[static_cast<Uint8>(color)]));
+	};
+	int color = _color + (_thinBorder ? 1 : 3) * mul;
+	for (int i = 0; i < 5; ++i)
+	{
+		rect(square, color);
+		if (_thinBorder)
+		{
+			if (i % 2 == 0) { ++square.x; ++square.y; }
+			square.w = std::max(0.0, square.w - 1); square.h = std::max(0.0, square.h - 1);
+			switch (i)
+			{
+			case 0: color = _color + 5 * mul; rect({square.w, 0, 1, 1}, color); break;
+			case 1: color = _color + 2 * mul; break;
+			case 2: color = _color + 4 * mul; rect({square.w + 1, 1, 1, 1}, color); break;
+			case 3: color = _color + 3 * mul; break;
+			default: break;
+			}
+		}
+		else
+		{
+			color += (i < 2 ? -1 : 1) * mul;
+			++square.x; ++square.y;
+			square.w = square.w >= 2 ? square.w - 2 : 1;
+			square.h = square.h >= 2 ? square.h - 2 : 1;
+		}
+	}
+	if (!_thinBorder && _innerColor) rect(square, _innerColor);
+	if (_bg)
+	{
+		if (_hdBackground.key.family.empty() && !_hdBackgroundId.empty())
+			_hdBackground = hdUiScreenDefinition(_hdBackgroundId, _bg->getWidth(), _bg->getHeight(), _bg->getHdUiManaLayout());
+		if (_hdBackground.key.family.empty())
+			throw Exception("[HD UI ERROR] Window background has no semantic HD resource identity");
+		auto palette = std::make_shared<std::array<HdRgba, 256>>();
+		for (size_t i = 0; i < palette->size(); ++i) (*palette)[i] = getHdColor(paletteMap[i]);
+		hdAppendUiImage(window, images, _hdBackground,
+			{square.x - _dx, square.y - _dy, square.w, square.h}, square, palette);
+	}
+}
+
 void Window::draw()
 {
 	Surface::draw();

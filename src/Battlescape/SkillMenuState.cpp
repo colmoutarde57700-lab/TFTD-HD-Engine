@@ -20,6 +20,7 @@
 #include "../Engine/Action.h"
 #include "../Engine/Game.h"
 #include "../Engine/LocalizedText.h"
+#include "../Engine/Logger.h"
 #include "../Engine/Options.h"
 #include "../Engine/Unicode.h"
 #include "../Mod/Mod.h"
@@ -55,15 +56,17 @@ SkillMenuState::SkillMenuState(BattleAction *action, int x, int y) : ActionMenuS
 	// Set palette
 	_game->getSavedGame()->getSavedBattle()->setPaletteByDepth(this);
 
-	const int hdUiScale = Options::getBattleUiScale();
 	for (int i = 0; i < (int)std::size(_actionMenu); ++i)
 	{
 		_actionMenu[i] = new ActionMenuItem(i, _game, x, y);
 		add(_actionMenu[i]);
-		_actionMenu[i]->setDisplayScale(hdUiScale, x, y);
 		_actionMenu[i]->setVisible(false);
 		_actionMenu[i]->onMouseClick((ActionHandler)&SkillMenuState::btnActionMenuItemClick);
 	}
+
+	Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-C2][SKILL-MENU] family=Battlescape"
+		<< " anchorUi=" << x << "," << y
+		<< " contentScale=" << getPresentationScale();
 
 	// Build up the popup menu
 	int id = 0;

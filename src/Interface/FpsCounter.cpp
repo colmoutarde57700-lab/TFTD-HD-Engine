@@ -18,6 +18,7 @@
  */
 
 #include "FpsCounter.h"
+#include "../Engine/HdCanvas.h"
 #include <cmath>
 #include "../Engine/Action.h"
 #include "../Engine/Timer.h"
@@ -114,6 +115,14 @@ void FpsCounter::draw()
 {
 	Surface::draw();
 	_text->blit(this->getSurface());
+}
+
+void FpsCounter::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas contents(getWidth(), getHeight());
+	_text->composeHd(contents, images);
+	composeHdLayer(canvas, contents);
 }
 
 void FpsCounter::addFrame()

@@ -1,3 +1,4 @@
+#include "HdRenderTrace.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -19,6 +20,13 @@
 #include "Screen.h"
 #include "HdPerf.h"
 #include "HdGpuBackend.h"
+#include "HdCanvasRenderer.h"
+#include "HdCanvasSignature.h"
+#include "../Interface/Cursor.h"
+#include "../Interface/Text.h"
+#include "../Interface/TextButton.h"
+#include "../Interface/FpsCounter.h"
+#include "PresentationSpaces.h"
 #include <algorithm>
 #include <sstream>
 #include <cmath>
@@ -28,6 +36,7 @@
 #include "../lodepng.h"
 #include "Exception.h"
 #include "Surface.h"
+#include "InteractiveSurface.h"
 #include "Logger.h"
 #include "Action.h"
 #include "Options.h"
@@ -44,6 +53,43 @@ namespace OpenXcom
 
 const int Screen::ORIGINAL_WIDTH = 320;
 const int Screen::ORIGINAL_HEIGHT = 200;
+
+void Screen::presentHdCanvas(const HdCanvas &canvas, double opacity)
+{
+	if (!Options::hdGraphics || useOpenGL() || !_screen ||
+		_screen->format->BitsPerPixel != 32 || _forceLegacy8Bit)
+		throw Exception("[HD PRESENTATION ERROR] HD scene requires the 32-bit HD presentation path");
+	// Keep the source scene, not a snapshot of the old logical screen, for fades.
+	_lastHdCanvas = std::make_unique<HdCanvas>(canvas);
+	HdCanvas frame(_lastHdCanvas->bounds().w, _lastHdCanvas->bounds().h);
+	frame.composite(*_lastHdCanvas, {}, opacity);
+	// Own the entire target, including letterboxing. A previous state's SDL
+	// clip must not preserve pixels from its historical presentation.
+	SDL_SetClipRect(_screen, nullptr);
+	SDL_FillRect(_screen, nullptr, SDL_MapRGBA(_screen->format, 0, 0, 0, 255));
+	const HdCanvasTransform transform{double(logicalToPhysicalX(0)), double(logicalToPhysicalY(0)),
+		getRenderScaleX(), getRenderScaleY()};
+	HdCanvasRenderer::render(frame, _hdCanvasImages, _screen, transform);
+	auto &gpu = HdGpuBackend::instance();
+	// This upload contains only the just-rendered HD scene at physical resolution.
+	// beginFrameLogical and Screen::flip are intentionally not part of this path.
+	if (!gpu.beginFrame(_screen) || !gpu.present())
+	{
+		gpu.abortFrame();
+		throw Exception("[HD PRESENTATION ERROR] HD scene presentation failed; caller must use traced fallback");
+	}
+}
+
+void Screen::fadeHdCanvas(double opacity)
+{
+	if (_lastHdCanvas) presentHdCanvas(*_lastHdCanvas, opacity);
+}
+
+void Screen::clearHdCanvas()
+{
+	presentHdCanvas(HdCanvas(_baseWidth, _baseHeight));
+	_hdCanvasImages.clear();
+}
 
 static const int VIDEO_WINDOW_POS_LEN = 40;
 static char VIDEO_WINDOW_POS[VIDEO_WINDOW_POS_LEN];
@@ -196,6 +242,28 @@ void Screen::handle(Action *action)
  */
 void Screen::flip(const std::function<void(SDL_Surface*)> &physicalPass)
 {
+	if (Options::hdGraphics)
+	{
+		// REAL HD PIXEL FIREWALL: OXCE may update rules and state, but its
+		// logical canvas is never uploaded, scaled or presented. Device failure
+		// fails closed instead of silently restoring the native renderer.
+		HdGpuBackend &gpu = HdGpuBackend::instance();
+		if (!gpu.beginFrameHdOnly(_screen))
+			throw Exception("REAL HD presentation unavailable: native display is forbidden");
+		if (physicalPass)
+		{
+			SDL_Surface *overlay = gpu.cpuOverlay();
+			if (!overlay)
+			{
+				gpu.abortFrame();
+				throw Exception("REAL HD overlay unavailable: native display is forbidden");
+			}
+			physicalPass(overlay);
+		}
+		if (!gpu.present())
+			throw Exception("REAL HD present failed: native display is forbidden");
+		return;
+	}
 	// perform any requested palette update
 	if (_flickerFix && _pushPalette && _numColors && _screen->format->BitsPerPixel == 8)
 	{
@@ -207,43 +275,84 @@ void Screen::flip(const std::function<void(SDL_Surface*)> &physicalPass)
 		_pushPalette = false;
 	}
 
-	const uint64_t perfScaleStart = hdPerfNowUs();
-	if (getWidth() != _baseWidth || getHeight() != _baseHeight || useOpenGL())
-	{
-		Zoom::flipWithZoom(_surface.get(), _screen, _topBlackBand, _bottomBlackBand, _leftBlackBand, _rightBlackBand, &glOutput);
-	}
-	else
-	{
-		SDL_BlitSurface(_surface.get(), 0, _screen, 0);
-	}
-	getHdPerfStats().current.scaleUs = hdPerfNowUs() - perfScaleStart;
-
-	// RC12 P6: D3D11 is a physical compositor, never an OXCE filter and never
-	// a logical-frame upscaler.  We first build the exact P4 physical software
-	// base, then upload that base once.  Map RGBA x1/x4/x8/x16 commands are
-	// drawn directly on the GPU; HUD/popups/cursor use a transparent CPU layer
-	// composited only at the end.  SDL video mode and input geometry stay intact.
 	HdGpuBackend &hdGpu = HdGpuBackend::instance();
 	bool hdGpuFrame = false;
-	if (!useOpenGL() && Options::hdGraphics && physicalPass && _screen && _screen->format->BitsPerPixel == 32)
+	bool hdGpuLogicalBase = false;
+	bool softwareBaseReady = false;
+	auto buildSoftwareBase = [&]()
+	{
+		if (softwareBaseReady) return;
+		const uint64_t perfScaleStart = hdPerfNowUs();
+		if (getWidth() != _baseWidth || getHeight() != _baseHeight || useOpenGL())
+		{
+			Zoom::flipWithZoom(_surface.get(), _screen, _topBlackBand, _bottomBlackBand, _leftBlackBand, _rightBlackBand, &glOutput);
+		}
+		else
+		{
+			SDL_BlitSurface(_surface.get(), 0, _screen, 0);
+		}
+		getHdPerfStats().current.scaleUs += hdPerfNowUs() - perfScaleStart;
+		getHdPerfStats().current.cpuScaleBypassed = false;
+		softwareBaseReady = true;
+	};
+
+	// Renderer Architecture V1: D3D11 now owns the logical->physical presentation
+	// transform on the normal HD path. OXCE still rasterizes its logical canvas,
+	// but the expensive full-frame CPU Zoom::flipWithZoom is no longer required
+	// before the GPU can render the HD world. This is deliberately behavior-
+	// preserving: the same logical canvas, letterbox geometry, input coordinates
+	// and physical HUD restore pass remain in force.
+	const bool canUseHdGpu = !useOpenGL() && Options::hdGraphics && physicalPass &&
+		_screen && _surface && _screen->format->BitsPerPixel == 32 && _surface->format->BitsPerPixel == 32;
+	if (canUseHdGpu)
 	{
 		const uint64_t gpuStart = hdPerfNowUs();
-		hdGpuFrame = hdGpu.beginFrame(_screen);
+		hdGpuFrame = hdGpu.beginFrameLogical(_screen, _surface.get(), _presentation);
 		getHdPerfStats().current.gpuOverlayUs += hdPerfNowUs() - gpuStart;
+		if (hdGpuFrame)
+		{
+			hdGpuLogicalBase = true;
+			getHdPerfStats().current.cpuScaleBypassed = true;
+		}
 	}
 
-	// RC11 TEST8-D: physical HD stays after the historical logical render.
-	// Software writes directly to the final framebuffer.  OpenGL uses a
-	// transparent native-resolution staging layer which is uploaded and alpha-
-	// composited by the GPU before the single buffer swap.
+	// If the direct GPU presentation path is unavailable, retain the exact stable
+	// historical path and optionally seed D3D11 from the already-scaled software
+	// framebuffer. This is also the automatic device/shader fallback.
+	if (!hdGpuFrame)
+	{
+		if (Options::hdGraphics) hdTraceRoute("presentation", "frame", "LEGACY_NATIVE",
+            canUseHdGpu ? "beginFrameLogical failed" : "HD presentation unavailable or caller has no HD pass", true);
+		buildSoftwareBase();
+		if (canUseHdGpu)
+		{
+			const uint64_t gpuStart = hdPerfNowUs();
+			hdGpuFrame = hdGpu.beginFrame(_screen);
+			getHdPerfStats().current.gpuOverlayUs += hdPerfNowUs() - gpuStart;
+		}
+	}
+
+	// Physical HD stays after the logical render. Software writes directly to the
+	// final framebuffer on fallback. D3D11 uses a transparent native-resolution
+	// staging layer for HUD/popups/cursor, composited after the world.
 	if (physicalPass && _screen)
 	{
 		const uint64_t perfPhysicalStart = hdPerfNowUs();
 		if (hdGpuFrame)
 		{
 			SDL_Surface *overlay = hdGpu.cpuOverlay();
-			if (overlay) physicalPass(overlay);
-			else { hdGpu.abortFrame(); hdGpuFrame = false; physicalPass(_screen); }
+			if (overlay)
+			{
+				physicalPass(overlay);
+			}
+			else
+			{
+				hdTraceRoute("presentation", "frame", "LEGACY_NATIVE", "HD overlay unavailable", true);
+				hdGpu.abortFrame();
+				hdGpuFrame = false;
+				if (hdGpuLogicalBase) buildSoftwareBase();
+				physicalPass(_screen);
+			}
 		}
 		else if (useOpenGL())
 		{
@@ -287,8 +396,6 @@ void Screen::flip(const std::function<void(SDL_Surface*)> &physicalPass)
 		_pushPalette = false;
 	}
 
-
-
 	const uint64_t perfFlipStart = hdPerfNowUs();
 	bool hdGpuPresented = false;
 	if (hdGpuFrame)
@@ -298,9 +405,11 @@ void Screen::flip(const std::function<void(SDL_Surface*)> &physicalPass)
 		getHdPerfStats().current.gpuOverlayUs += hdPerfNowUs() - gpuStart;
 		if (!hdGpuPresented)
 		{
-			// Device/swap failure: the P4 software base is still in _screen. Re-run
-			// the physical pass with GPU disabled so the user never sees a blank frame.
+			hdTraceRoute("presentation", "frame", "LEGACY_NATIVE", "GPU present failed", true);
+			// Device/swap failure: if D3D11 owned the base transform, reconstruct the
+			// exact stable software framebuffer now, then re-run physical composition.
 			hdGpu.abortFrame();
+			if (hdGpuLogicalBase) buildSoftwareBase();
 			if (physicalPass && _screen->format->BitsPerPixel == 32) physicalPass(_screen);
 		}
 	}
@@ -322,42 +431,266 @@ void Screen::flip(const std::function<void(SDL_Surface*)> &physicalPass)
 
 double Screen::getRenderScaleX() const
 {
-	if (!_screen || _baseWidth <= 0) return 1.0;
-	return (double)std::max(1, _screen->w - _leftBlackBand - _rightBlackBand) / (double)_baseWidth;
+	return _presentation.scaleX();
 }
 
 double Screen::getRenderScaleY() const
 {
-	if (!_screen || _baseHeight <= 0) return 1.0;
-	return (double)std::max(1, _screen->h - _topBlackBand - _bottomBlackBand) / (double)_baseHeight;
+	return _presentation.scaleY();
 }
 
 int Screen::logicalToPhysicalX(double x) const
 {
-	return _leftBlackBand + (int)std::floor(x * getRenderScaleX() + 0.5);
+	return _presentation.logicalToPhysicalX(x);
 }
 
 int Screen::logicalToPhysicalY(double y) const
 {
-	return _topBlackBand + (int)std::floor(y * getRenderScaleY() + 0.5);
+	return _presentation.logicalToPhysicalY(y);
+}
+
+bool Screen::blitNativeSurfaceAt(Surface *surface, SDL_Surface *destination, int x, int y, int w, int h) const
+{
+	if (Options::hdGraphics) return false; // REAL HD pixel firewall.
+    if (!surface || !destination || w <= 0 || h <= 0) return false;
+    const int ds = std::max(1, surface->getDisplayScale());
+    const double sx = double(w) / std::max(1, surface->getWidth() * ds);
+    const double sy = double(h) / std::max(1, surface->getHeight() * ds);
+    // These exact classes expose their complete raster. Do not include compound
+    // controls (ComboBox, Slider, TextList...) whose children need native blit().
+    if (typeid(*surface) == typeid(Surface) || typeid(*surface) == typeid(InteractiveSurface) ||
+        typeid(*surface) == typeid(Text) || typeid(*surface) == typeid(TextButton) ||
+        typeid(*surface) == typeid(Cursor) || typeid(*surface) == typeid(FpsCounter))
+    {
+        auto src = surface->getPresentationSurface();
+        if (!src) return false;
+        auto &gpu = HdGpuBackend::instance();
+        if (gpu.isCpuOverlay(destination) && gpu.drawLegacySurface(src, surface, x, y, w, h, surface->getDisplayAlpha())) return true;
+        auto raw = zoomSurface(src, double(w) / src->w, double(h) / src->h, 0);
+        if (!raw) return false;
+        std::unique_ptr<SDL_Surface, void(*)(SDL_Surface*)> scaled(raw, SDL_FreeSurface);
+        if (src->flags & SDL_SRCCOLORKEY) SDL_SetColorKey(raw, SDL_SRCCOLORKEY, src->format->colorkey);
+        if (surface->getDisplayAlpha() < 255) SDL_SetAlpha(raw, SDL_SRCALPHA, surface->getDisplayAlpha());
+        if (gpu.isCpuOverlay(destination)) return gpu.blitCpuOverlay(raw, x, y);
+        SDL_Rect dst = {(Sint16)x, (Sint16)y, 0, 0};
+        return SDL_BlitSurface(raw, nullptr, destination, &dst) == 0;
+    }
+    const int cw = std::max(640, std::max(_baseWidth, surface->getDisplayX() + surface->getWidth() * ds));
+    const int ch = std::max(360, std::max(_baseHeight, surface->getDisplayY() + surface->getHeight() * ds));
+    auto raw = SDL_CreateRGBSurface(SDL_SWSURFACE, cw, ch, 32, 0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000);
+    if (!raw) return false;
+    std::unique_ptr<SDL_Surface, void(*)(SDL_Surface*)> logical(raw, SDL_FreeSurface);
+    SDL_FillRect(raw, nullptr, 0);
+    surface->blit(raw);
+    SDL_SetAlpha(raw, SDL_SRCALPHA, 255);
+    auto scaled = zoomSurface(raw, sx, sy, 0);
+    if (!scaled) return false;
+    std::unique_ptr<SDL_Surface, void(*)(SDL_Surface*)> physical(scaled, SDL_FreeSurface);
+    SDL_SetAlpha(scaled, SDL_SRCALPHA, 255);
+    const int px = int(std::lround(x - surface->getDisplayX() * sx));
+    const int py = int(std::lround(y - surface->getDisplayY() * sy));
+    auto &gpu = HdGpuBackend::instance();
+    if (gpu.isCpuOverlay(destination)) return gpu.blitCpuOverlay(scaled, px, py);
+    SDL_Rect dst = {(Sint16)px, (Sint16)py, 0, 0};
+    return SDL_BlitSurface(scaled, nullptr, destination, &dst) == 0;
+}
+
+bool Screen::tryBlitHdSurfaceAt(Surface *surface, SDL_Surface *destination, int x, int y, int w, int h) const
+{
+    if (!Options::hdGraphics || !surface || !surface->isDisplayVisible() || !destination || w <= 0 || h <= 0) return false;
+    if (!_hdUiWidgetsEnabled)
+    {
+        if (_hdTraceContext == "Global:FPS-Cursor")
+            hdTraceRoute("ui-policy", _hdTraceContext, "LEGACY_NATIVE", "R4 native global controls", true);
+        return false; // Planned native UI, no HD attempt/exception per widget.
+    }
+    // A failed producer is not retried on every frame. Resource-cache reset or
+    // a newly created Surface permits a fresh attempt; diagnostics remain deduplicated.
+    if (surface->hasHdPresentationFailure(_hdCanvasImages.generation())) return false;
+    // Cursor coordinates are not a resource identity: moving it must not grow
+    // the route registry or append a new log line for each position.
+    const bool cursor = typeid(*surface) == typeid(Cursor);
+    const std::string identity = _hdTraceContext + ":" + std::string(typeid(*surface).name()) + ":" + surface->getHdResourceId() +
+        (cursor ? "" : "@" + std::to_string(surface->getX()) + "," + std::to_string(surface->getY()));
+    auto &cache = _hdUiRasterCache;
+    cache.generation(_hdCanvasImages.generation());
+    const Uint32 now = SDL_GetTicks();
+    if (!cache.reportTick) cache.reportTick = now;
+    if (Uint32(now - cache.reportTick) >= 5000)
+    {
+        Log(LOG_INFO) << "[HD UI PERF P2.1] intervalMs=" << Uint32(now - cache.reportTick)
+            << " hits=" << cache.hits << " misses=" << cache.misses << " rasters=" << cache.rasters
+            << " rasterPixels=" << cache.rasterPixels << " composeMs=" << cache.composeMs
+            << " rasterMs=" << cache.rasterMs << " submitMs=" << cache.submitMs
+            << " cacheBytes=" << cache.bytes() << " entries=" << cache.size() << " evictions=" << cache.evictions;
+        cache.hits = cache.misses = cache.rasters = cache.rasterPixels = cache.evictions = 0;
+        cache.composeMs = cache.rasterMs = cache.submitMs = 0;
+        cache.reportTick = now;
+    }
+    try
+    {
+        const int scale = std::max(1, surface->getDisplayScale());
+        const int logicalW = surface->getWidth() * scale, logicalH = surface->getHeight() * scale;
+        if (logicalW <= 0 || logicalH <= 0) return true;
+        HdCanvas scene(std::max(640, std::max(_baseWidth, surface->getDisplayX() + logicalW)),
+            std::max(360, std::max(_baseHeight, surface->getDisplayY() + logicalH)));
+        const Uint32 composeStart = SDL_GetTicks();
+        surface->composeHd(scene, _hdCanvasImages);
+        cache.composeMs += Uint32(SDL_GetTicks() - composeStart);
+        const double sx = double(w) / logicalW, sy = double(h) / logicalH;
+        const double originX = x - surface->getDisplayX() * sx;
+        const double originY = y - surface->getDisplayY() * sy;
+        // Compound widgets (notably dropdown lists) extend beyond their button.
+        // Include every top-level HD layer rather than clipping to that button.
+        double left = surface->getDisplayX(), top = surface->getDisplayY();
+        double right = left + logicalW, bottom = top + logicalH;
+        for (const auto &command : scene.commands())
+        {
+            const HdRect bounds = command.op == HdCanvasOp::Layer
+                ? command.transform.rect(command.layer->bounds()) : command.bounds;
+            left = std::min(left, bounds.x); top = std::min(top, bounds.y);
+            right = std::max(right, bounds.x + bounds.w); bottom = std::max(bottom, bounds.y + bounds.h);
+        }
+        x = std::max(0, int(std::floor(originX + left * sx)));
+        y = std::max(0, int(std::floor(originY + top * sy)));
+        w = std::min(destination->w, int(std::ceil(originX + right * sx))) - x;
+        h = std::min(destination->h, int(std::ceil(originY + bottom * sy))) - y;
+        if (w <= 0 || h <= 0) return true;
+        const HdCanvasTransform rasterTransform{originX - x, originY - y, sx, sy};
+        HdCanvasSignature key;
+        key.text(_hdTraceContext); key.scalar(w); key.scalar(h);
+        key.scalar(destination->format->Rmask); key.scalar(destination->format->Gmask);
+        key.scalar(destination->format->Bmask); key.scalar(destination->format->Amask);
+        key.transform(rasterTransform); key.canvas(scene);
+        std::string signature = key.take();
+        HdUiRasterCache::SurfacePtr target;
+        if (const auto *cached = cache.find(surface, signature))
+        {
+            if (!cached->error.empty())
+            {
+                hdTraceRoute("widget", identity, "LEGACY_NATIVE", cached->error, true);
+                return false;
+            }
+            target = cached->surface;
+        }
+        else
+        {
+            // Rebuild only when the complete HD command content changes.
+            // Hover/pressed state, text, palette, crop, child layers, clipping,
+            // scale and image treatment are all part of the exact signature.
+            auto raw = SDL_CreateRGBSurface(SDL_SWSURFACE, w, h, 32,
+                destination->format->Rmask, destination->format->Gmask,
+                destination->format->Bmask, destination->format->Amask ? destination->format->Amask :
+                ~(destination->format->Rmask | destination->format->Gmask | destination->format->Bmask));
+            if (!raw) throw Exception(SDL_GetError());
+            target = HdUiRasterCache::SurfacePtr(raw, SDL_FreeSurface);
+            SDL_FillRect(raw, nullptr, SDL_MapRGBA(raw->format, 0, 0, 0, 0));
+            const Uint32 rasterStart = SDL_GetTicks();
+            ++cache.rasters; cache.rasterPixels += std::uint64_t(w) * h;
+            try { HdCanvasRenderer::render(scene, _hdCanvasImages, raw, rasterTransform); }
+            catch (const std::exception &error)
+            {
+                cache.rasterMs += Uint32(SDL_GetTicks() - rasterStart);
+                cache.store(surface, std::move(signature), {}, error.what());
+                throw;
+            }
+            cache.rasterMs += Uint32(SDL_GetTicks() - rasterStart);
+            SDL_SetAlpha(raw, SDL_SRCALPHA, 255);
+            cache.store(surface, std::move(signature), target);
+        }
+        const Uint32 submitStart = SDL_GetTicks();
+        auto raw = target.get();
+        auto &gpu = HdGpuBackend::instance();
+        if (gpu.isCpuOverlay(destination))
+        {
+            if (!gpu.blitCpuOverlay(raw, x, y)) throw Exception("Cannot submit HD widget");
+        }
+        else
+        {
+            SDL_Rect position = {(Sint16)x, (Sint16)y, 0, 0};
+            if (SDL_BlitSurface(raw, nullptr, destination, &position) != 0) throw Exception(SDL_GetError());
+        }
+        cache.submitMs += Uint32(SDL_GetTicks() - submitStart);
+        hdTraceRoute("widget", identity, "HD_PIPELINE", "HD producer completed");
+        return true;
+    }
+    catch (const std::exception &error)
+    {
+        surface->latchHdPresentationFailure(_hdCanvasImages.generation(), error.what());
+        hdTraceRoute("widget", identity, "LEGACY_NATIVE", error.what(), true);
+        return false;
+    }
 }
 
 void Screen::blitSurfacePhysical(Surface *surface, bool cursorCoordinates, SDL_Surface *destination) const
 {
 	SDL_Surface *target = destination ? destination : _screen;
 	if (!surface || !_screen || !target || target->format->BitsPerPixel != 32 || !surface->isDisplayVisible()) return;
-	SDL_Surface *src = surface->getSurface();
-	if (!src || src->w <= 0 || src->h <= 0) return;
+	if (surface->getWidth() <= 0 || surface->getHeight() <= 0) return;
 
-	const double sx = cursorCoordinates ? _scaleX : getRenderScaleX();
-	const double sy = cursorCoordinates ? _scaleY : getRenderScaleY();
+	// V1-C2 R2 cursor cutover: cursor POSITION still follows the real physical
+	// mouse through the current Screen scale/bands, but cursor SIZE belongs to
+	// presentation/UI space and must not shrink/grow with Battlescape world zoom.
+	const double positionScaleX = cursorCoordinates ? _scaleX : getRenderScaleX();
+	const double positionScaleY = cursorCoordinates ? _scaleY : getRenderScaleY();
+	double sizeScaleX = positionScaleX;
+	double sizeScaleY = positionScaleY;
+	if (cursorCoordinates)
+	{
+		const PresentationTransform cursorUi = PresentationSpacesContract::uniformUiFit(
+			640, 360, _screen->w, _screen->h);
+		sizeScaleX = cursorUi.scaleX;
+		sizeScaleY = cursorUi.scaleY;
+
+		static double lastPositionScaleX = -1.0;
+		static double lastPositionScaleY = -1.0;
+		static double lastSizeScaleX = -1.0;
+		static double lastSizeScaleY = -1.0;
+		if (std::fabs(lastPositionScaleX - positionScaleX) > 0.000001 ||
+			std::fabs(lastPositionScaleY - positionScaleY) > 0.000001 ||
+			std::fabs(lastSizeScaleX - sizeScaleX) > 0.000001 ||
+			std::fabs(lastSizeScaleY - sizeScaleY) > 0.000001)
+		{
+			Log(LOG_INFO) << "[PRESENTATION-SPACES CURSOR V1]"
+				<< " positionScale=" << positionScaleX << "x" << positionScaleY
+				<< " sizeScale=" << sizeScaleX << "x" << sizeScaleY
+				<< " physical=" << _screen->w << "x" << _screen->h;
+			lastPositionScaleX = positionScaleX;
+			lastPositionScaleY = positionScaleY;
+			lastSizeScaleX = sizeScaleX;
+			lastSizeScaleY = sizeScaleY;
+		}
+	}
 	const int bandX = cursorCoordinates ? _cursorLeftBlackBand : _leftBlackBand;
 	const int bandY = cursorCoordinates ? _cursorTopBlackBand : _topBlackBand;
 	const int presentation = std::max(1, surface->getDisplayScale());
-	const int drawW = std::max(1, (int)std::floor((double)src->w * presentation * sx + 0.5));
-	const int drawH = std::max(1, (int)std::floor((double)src->h * presentation * sy + 0.5));
-	const int drawX = bandX + (int)std::floor((double)surface->getDisplayX() * sx + 0.5);
-	const int drawY = bandY + (int)std::floor((double)surface->getDisplayY() * sy + 0.5);
+	const int drawW = std::max(1, (int)std::floor((double)surface->getWidth() * presentation * sizeScaleX + 0.5));
+	const int drawH = std::max(1, (int)std::floor((double)surface->getHeight() * presentation * sizeScaleY + 0.5));
+	const int drawX = bandX + (int)std::floor((double)surface->getDisplayX() * positionScaleX + 0.5);
+	const int drawY = bandY + (int)std::floor((double)surface->getDisplayY() * positionScaleY + 0.5);
+
+	if (tryBlitHdSurfaceAt(surface, target, drawX, drawY, drawW, drawH)) return;
+	if (Options::hdGraphics)
+	{
+		// An unmigrated widget is absent, never replaced by OXCE pixels.
+		hdTraceRoute("pixel-firewall", _hdTraceContext, "REAL_HD_MISSING",
+			"Native widget pixels forbidden in REAL HD", true);
+		return;
+	}
+	if (blitNativeSurfaceAt(surface, target, drawX, drawY, drawW, drawH)) return;
+	hdTraceRoute("widget", typeid(*surface).name(), "LEGACY_NATIVE", "Compound fallback allocation failed; parent raster only", true);
+	SDL_Surface *src = surface->getPresentationSurface();
+	if (!src) return;
+	// Presentation Pipeline V1: on the D3D11 path, ordinary OXCE surfaces are
+	// themselves valid renderer inputs. Keep their Legacy pixels/palette exactly
+	// as authored, but let the GPU perform the logical->physical nearest scaling
+	// instead of allocating a temporary zoomSurface on the CPU every frame.
+	HdGpuBackend &gpu = HdGpuBackend::instance();
+	if (gpu.isCpuOverlay(target) && gpu.drawLegacySurface(src, surface,
+		drawX, drawY, drawW, drawH, surface->getDisplayAlpha()))
+	{
+		return;
+	}
 
 	++getHdPerfStats().current.physicalZoomSurfaces;
 	SDL_Surface *scaled = zoomSurface(src, (double)drawW / (double)src->w, (double)drawH / (double)src->h, 0);
@@ -371,7 +704,6 @@ void Screen::blitSurfacePhysical(Surface *surface, bool cursorCoordinates, SDL_S
 		SDL_SetAlpha(scaled, SDL_SRCALPHA, surface->getDisplayAlpha());
 	}
 	SDL_Rect dst = { (Sint16)drawX, (Sint16)drawY, 0, 0 };
-	HdGpuBackend &gpu = HdGpuBackend::instance();
 	if (gpu.isCpuOverlay(target))
 	{
 		gpu.blitCpuOverlay(scaled, drawX, drawY);
@@ -637,6 +969,24 @@ void Screen::resetDisplay(bool resetVideo, bool noShaders)
 		_topBlackBand = _bottomBlackBand = _leftBlackBand = _rightBlackBand = _cursorTopBlackBand = _cursorLeftBlackBand = 0;
 	}
 
+	// Renderer Architecture V1: one authoritative description of the logical
+	// canvas inside the physical display.  Map/GPU/UI presentation code must
+	// consume this instead of independently rebuilding scale/band formulae.
+	_presentation.configure(_baseWidth, _baseHeight, getWidth(), getHeight(),
+		_leftBlackBand, _topBlackBand, _rightBlackBand, _bottomBlackBand);
+
+	const PresentationRect &traceContent = _presentation.contentRect();
+	Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][SCREEN] physical=" << getWidth() << "x" << getHeight()
+		<< " logical=" << _baseWidth << "x" << _baseHeight
+		<< " content=" << traceContent.x << "," << traceContent.y << "," << traceContent.w << "x" << traceContent.h
+		<< " pcScale=" << _presentation.scaleX() << "x" << _presentation.scaleY()
+		<< " rawScale=" << _scaleX << "x" << _scaleY
+		<< " bands(LTRB)=" << _leftBlackBand << "," << _topBlackBand << "," << _rightBlackBand << "," << _bottomBlackBand
+		<< " cursorBands(LT)=" << _cursorLeftBlackBand << "," << _cursorTopBlackBand
+		<< " optionsBase=" << Options::baseXResolution << "x" << Options::baseYResolution
+		<< " world(battle/geo)=" << Options::battlescapeScale << "/" << Options::geoscapeScale
+		<< " ui(battle/geo/aqua)=" << Options::getBattleUiScale() << "/" << Options::getGeoUiScale() << "/" << Options::getAquanautUiScale();
+
 	if (useOpenGL())
 	{
 #ifndef __NO_OPENGL
@@ -700,8 +1050,16 @@ int Screen::getCursorLeftBlackBand() const
  * Saves a screenshot of the screen's contents.
  * @param filename Filename of the PNG file.
  */
-void Screen::screenshot(const std::string &filename) const
+void Screen::screenshot(const std::string &filename)
 {
+	// The direct D3D11 presentation path deliberately leaves the SDL physical
+	// framebuffer out of the hot frame loop. Refresh it only on an explicit
+	// screenshot request; this preserves historical screenshot semantics without
+	// paying the full-frame CPU scale cost every rendered frame.
+	if (!useOpenGL() && Options::hdGraphics && useHdGpuPhysical() && _surface && _screen)
+	{
+		Zoom::flipWithZoom(_surface.get(), _screen, _topBlackBand, _bottomBlackBand, _leftBlackBand, _rightBlackBand, &glOutput);
+	}
 	SDL_Surface *screenshot = SDL_AllocSurface(0, getWidth() - getWidth()%4, getHeight(), 24, 0xff, 0xff00, 0xff0000, 0);
 
 	if (useOpenGL())
@@ -854,6 +1212,10 @@ int Screen::getDY() const
  */
 void Screen::updateScale(int type, int &width, int &height, bool change)
 {
+	const int traceInputW = width;
+	const int traceInputH = height;
+	const int traceBaseW = Options::baseXResolution;
+	const int traceBaseH = Options::baseYResolution;
 	double pixelRatioY = 1.0;
 
 	if (Options::nonSquarePixelRatio)
@@ -919,6 +1281,14 @@ void Screen::updateScale(int type, int &width, int &height, bool change)
 		Options::baseXResolution = width;
 		Options::baseYResolution = height;
 	}
+
+	Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][UPDATE-SCALE] type=" << type
+		<< " change=" << (change ? 1 : 0)
+		<< " input=" << traceInputW << "x" << traceInputH
+		<< " output=" << width << "x" << height
+		<< " baseBefore=" << traceBaseW << "x" << traceBaseH
+		<< " baseAfter=" << Options::baseXResolution << "x" << Options::baseYResolution
+		<< " display=" << Options::displayWidth << "x" << Options::displayHeight;
 }
 
 }

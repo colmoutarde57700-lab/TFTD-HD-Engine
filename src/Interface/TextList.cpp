@@ -17,6 +17,7 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "TextList.h"
+#include "../Engine/HdCanvas.h"
 #include <cstdarg>
 #include <cmath>
 #include <algorithm>
@@ -1060,6 +1061,57 @@ void TextList::draw()
  * Blits the text list and selector.
  * @param surface Pointer to surface to blit onto.
  */
+void TextList::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	if (_bg && _selector && _selector->isDisplayVisible())
+	{
+		HdCanvas selection(_selector->getWidth(), _selector->getHeight());
+		const auto mapping = _contrast ? hdUiOffsetBlockPalette(-5) :
+			(_comboBox ? hdUiOffsetPalette(1, Palette::backPos) : hdUiOffsetBlockPalette(-10));
+		_bg->composeHdBackdrop(selection, images,
+			{double(_selector->getX() - _bg->getX()), double(_selector->getY() - _bg->getY()),
+			 double(_selector->getWidth()), double(_selector->getHeight())}, selection.bounds(), mapping);
+		_selector->composeHdLayer(canvas, selection);
+	}
+	HdCanvas contents(getWidth(), getHeight());
+	if (!_rows.empty() && _scroll < _rows.size())
+	{
+		int y = 0;
+		for (int row = static_cast<int>(_scroll); row > 0 && _rows[row] == _rows[row - 1]; --row)
+			y -= _font->getHeight() + _font->getSpacing();
+		for (size_t i = _rows[_scroll]; i < _texts.size() && i < _rows[_scroll] + _visibleRows; ++i)
+		{
+			for (auto *text : _texts[i])
+			{
+				text->setY(y);
+				text->composeHd(contents, images);
+			}
+			y += (_texts[i].empty() ? _font->getHeight() : _texts[i].front()->getHeight()) + _font->getSpacing();
+		}
+	}
+	composeHdLayer(canvas, contents);
+	if (_arrowPos != -1 && !_rows.empty() && _scroll < _rows.size())
+	{
+		int y = getY();
+		for (int row = static_cast<int>(_scroll); row > 0 && _rows[row] == _rows[row - 1]; --row)
+			y -= _font->getHeight() + _font->getSpacing();
+		for (size_t i = _rows[_scroll]; i < _texts.size() && i < _rows[_scroll] + _visibleRows && y < getY() + getHeight(); ++i)
+		{
+			_arrowLeft[i]->setY(y); _arrowRight[i]->setY(y);
+			if (y >= getY())
+			{
+				_arrowLeft[i]->composeHd(canvas, images);
+				_arrowRight[i]->composeHd(canvas, images);
+			}
+			y += (_texts[i].empty() ? _font->getHeight() : _texts[i].front()->getHeight()) + _font->getSpacing();
+		}
+	}
+	_up->composeHd(canvas, images);
+	_down->composeHd(canvas, images);
+	_scrollbar->composeHd(canvas, images);
+}
+
 void TextList::blit(SDL_Surface *surface)
 {
 	if (_visible && !_hidden)

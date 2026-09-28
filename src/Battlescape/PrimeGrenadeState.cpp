@@ -30,6 +30,7 @@
 #include "../Mod/Mod.h"
 #include "../Mod/RuleInterface.h"
 #include "../Engine/Sound.h"
+#include "../Engine/HdUiPicture.h"
 
 namespace OpenXcom
 {
@@ -74,6 +75,12 @@ PrimeGrenadeState::PrimeGrenadeState(BattleAction *action, bool inInventoryView,
 	// Set up objects
 	add(_bg);
 	_bg->drawRect(0, 0, _bg->getWidth(), _bg->getHeight(), grenadeBackground->color);
+	if (Options::hdGraphics)
+	{
+		HdUiPicture picture(_bg->getWidth(), _bg->getHeight());
+		picture.fill(picture.bounds(), grenadeBackground->color);
+		_bg->setHdPicture(picture);
+	}
 
 	add(_frame, "grenadeMenu", "battlescape");
 	_frame->setThickness(3);
@@ -100,6 +107,13 @@ PrimeGrenadeState::PrimeGrenadeState(BattleAction *action, bool inInventoryView,
 		square.w -= 2;
 		square.h -= 2;
 		_button[i]->drawRect(&square, grenadeBackground->color2);
+		if (Options::hdGraphics)
+		{
+			HdUiPicture picture(_button[i]->getWidth(), _button[i]->getHeight());
+			picture.fill(picture.bounds(), grenadeBackground->border);
+			picture.fill({1,1,double(_button[i]->getWidth()-2),double(_button[i]->getHeight()-2)}, grenadeBackground->color2);
+			_button[i]->setHdPicture(picture);
+		}
 
 		std::ostringstream ss;
 		ss << i;

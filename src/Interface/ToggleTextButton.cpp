@@ -86,6 +86,12 @@ void ToggleTextButton::draw()
 	}
 }
 
+void ToggleTextButton::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (_invertedColor > -1) _fakeGroup = 0;
+	composeHdButton(canvas, images, _invertedColor > -1 && _isPressed ? _invertedColor + 4 : -1);
+}
+
 
 
 

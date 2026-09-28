@@ -18,12 +18,15 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <SDL.h>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <memory>
 #include <vector>
 #include <assert.h>
 #include "GraphSubset.h"
+#include "HdUiPalette.h"
+#include "HdUiFailureLatch.h"
 
 namespace OpenXcom
 {
@@ -32,6 +35,11 @@ class Font;
 class Language;
 class ScriptWorkerBase;
 class SurfaceCrop;
+class HdCanvas;
+class HdImageCache;
+class HdUiPicture;
+struct HdRgba;
+struct HdRect;
 template<typename Pixel> class SurfaceRaw;
 
 /**
@@ -95,6 +103,13 @@ protected:
 	int _displayAnchorX;
 	int _displayAnchorY;
 	Uint8 _displayAlpha;
+	// Resource identity assigned by Mod; it is layout metadata only. It does
+	// not authorize this Surface's pixel buffer as an HD image source.
+	std::string _hdResourceId;
+	std::string _hdNativeFallbackReason;
+	HdUiFailureLatch _hdPresentationFailure;
+	bool _hdUiManaLayout = false;
+	std::shared_ptr<const HdUiPicture> _hdPicture;
 
 	/// Copies raw pixels.
 	template <typename T>
@@ -149,6 +164,27 @@ public:
 	virtual void draw();
 	/// Blits this surface onto another one.
 	virtual void blit(SDL_Surface *surface);
+	/// Emit this widget through our HD scene. Unmigrated widgets must fail
+	/// explicitly; their old bitmap is never an implicit image source.
+	virtual void composeHd(HdCanvas &canvas, HdImageCache &images);
+	// Re-express a background region from HD resources and style data.
+	virtual void composeHdBackdrop(HdCanvas &canvas, HdImageCache &images,
+		HdRect source, HdRect destination, const HdUiIndexMap &paletteMap) const;
+	void setHdResourceId(const std::string &id, bool manaLayout = false) { _hdResourceId = id; _hdUiManaLayout = manaLayout; }
+	const std::string &getHdResourceId() const { return _hdResourceId; }
+	bool getHdUiManaLayout() const { return _hdUiManaLayout; }
+	/// Explicit resource/layout binding; never inferred from blit/copy pixels.
+	void setHdPicture(const HdUiPicture &picture);
+	HdUiPicture getHdPicture() const;
+	bool hasHdPresentationFailure(std::uint64_t generation) const
+	{ return _hdPresentationFailure.failed(generation); }
+	void latchHdPresentationFailure(std::uint64_t generation, const std::string &reason)
+	{ _hdPresentationFailure.record(generation, reason); }
+	void setHdNativeFallback(const std::string &reason) { _hdNativeFallbackReason = reason; }
+	bool hasHdPicture() const { return _hdPicture || !_hdResourceId.empty(); }
+	/// Convert interface style data, without reading the surface's raster.
+	HdRgba getHdColor(Uint8 color) const;
+	void composeHdLayer(HdCanvas &target, const HdCanvas &layer) const;
 	/// Sets presentation-only integer scaling around a screen anchor.
 	virtual void setDisplayScale(int scale, int anchorX = 0, int anchorY = 0);
 	int getDisplayScale() const { return _displayScale; }
@@ -287,6 +323,10 @@ public:
 	{
 		return _surface.get();
 	}
+	/// Returns the pixels that should be presented for the current visual state.
+	/// Unlike getSurface(), this refreshes lazily-redrawn widgets and may be
+	/// overridden by controls with alternate pressed/toggled surfaces.
+	virtual SDL_Surface *getPresentationSurface();
 	/**
 	 * Returns the width of the surface.
 	 * @return Width in pixels.

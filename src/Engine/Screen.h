@@ -22,6 +22,10 @@
 #include <functional>
 #include "OpenGL.h"
 #include "Surface.h"
+#include "PresentationContext.h"
+#include "HdCanvas.h"
+#include "HdImage.h"
+#include "HdUiRasterCache.h"
 
 namespace OpenXcom
 {
@@ -54,6 +58,13 @@ private:
 	OpenGL glOutput;
 	Surface::UniqueBufferPtr _buffer;
 	Surface::UniqueSurfacePtr _surface;
+	PresentationContext _presentation;
+	// A complete own-renderer scene, never a copy of the Legacy logical buffer.
+	std::unique_ptr<HdCanvas> _lastHdCanvas;
+	mutable HdImageCache _hdCanvasImages;
+	mutable HdUiRasterCache _hdUiRasterCache;
+	std::string _hdTraceContext;
+	bool _hdUiWidgetsEnabled = false;
 	// TEST8-D: transparent native-resolution staging layer uploaded to OpenGL.
 	Surface::UniqueBufferPtr _glPhysicalOverlayBuffer;
 	Surface::UniqueSurfacePtr _glPhysicalOverlaySurface;
@@ -78,6 +89,16 @@ public:
 	void handle(Action *action);
 	/// Renders the screen onto the game window.
 	void flip(const std::function<void(SDL_Surface*)> &physicalPass = std::function<void(SDL_Surface*)>());
+	/// Presents an HD scene without uploading the historical logical canvas.
+	void presentHdCanvas(const HdCanvas &canvas, double opacity = 1.0);
+	/// Re-presents the last HD scene for an HD fade; no palette/Legacy redraw.
+	void fadeHdCanvas(double opacity);
+	bool hasHdCanvas() const { return bool(_lastHdCanvas); }
+	void discardHdCanvas() { _lastHdCanvas.reset(); }
+	/// Clears the physical output through the HD presentation path.
+	void clearHdCanvas();
+	HdImageCache &getHdCanvasImages() { return _hdCanvasImages; }
+	void setHdTraceContext(const std::string &context, bool widgetsEnabled = false) { _hdTraceContext = context; _hdUiWidgetsEnabled = widgetsEnabled; }
 
 	/// Gets the physical display surface (software renderer only).
 	SDL_Surface *getDisplaySurface() const { return _screen; }
@@ -87,7 +108,11 @@ public:
 	/// Maps logical coordinates to the displayed image in physical pixels.
 	int logicalToPhysicalX(double x) const;
 	int logicalToPhysicalY(double y) const;
+	/// Central logical-to-physical presentation description used by the HD backend.
+	const PresentationContext &getPresentationContext() const { return _presentation; }
 	/// Re-blits one logical Surface directly to the final 32-bit framebuffer.
+	bool blitNativeSurfaceAt(Surface *surface, SDL_Surface *destination, int x, int y, int w, int h) const;
+	bool tryBlitHdSurfaceAt(Surface *surface, SDL_Surface *destination, int x, int y, int w, int h) const;
 	void blitSurfacePhysical(Surface *surface, bool cursorCoordinates = false, SDL_Surface *destination = nullptr) const;
 	/// Clears the screen.
 	void clear();
@@ -113,7 +138,7 @@ public:
 	/// Gets the screen's left black forbidden to cursor band's width.
 	int getCursorLeftBlackBand() const;
 	/// Takes a screenshot.
-	void screenshot(const std::string &filename) const;
+	void screenshot(const std::string &filename);
 	/// Checks whether a 32bit scaler is requested and works for the selected resolution
 	static bool use32bitScaler();
 	/// Checks whether OpenGL output is requested

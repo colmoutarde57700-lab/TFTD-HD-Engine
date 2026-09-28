@@ -245,13 +245,13 @@ void UnitSprite::draw(const BattleUnit* unit, int part, int x, int y, int shade,
 	};
 	// Call the matching routine
 	(this->*(routines[_drawingRoutine]))();
-    RenderLayer effects{nullptr, "", -1, _x, _y, _shade, 0,
-        GraphSubset(_dest->getWidth(), _dest->getHeight()), false};
-    renderLayer(effects, [&]() {
 	// draw fire
 	if (unit->getFire() > 0)
 	{
-		_fireSurface->getFrame(4 + (_animationFrame / 2) % 4)->blitNShade(_dest, _x, _y, 0, _mask);
+		const int frame = 4 + (_animationFrame / 2) % 4;
+		const Surface *surface = _fireSurface->getFrame(frame);
+		RenderLayer layer{surface, "SMOKE.PCK", frame, _x, _y, 0, 0, _mask, false};
+		renderLayer(layer, [&]() { surface->blitNShade(_dest, _x, _y, 0, _mask); });
 	}
 	if (_breathSurface && _helmet && unit->getBreathExhaleFrame() >= 0 && armor->drawBubbles() && !unit->getFloorAbove())
 	{
@@ -259,23 +259,28 @@ void UnitSprite::draw(const BattleUnit* unit, int part, int x, int y, int shade,
 		if (tmpSurface)
 		{
 			// lower the bubbles for shorter or kneeling units.
-			tmpSurface->blitNShade(_dest, _x, _y- 30 + (22 - unit->getHeight()), shade, _mask);
+			const int bubbleY = _y - 30 + (22 - unit->getHeight());
+			RenderLayer layer{tmpSurface, "BREATH-1.PCK", unit->getBreathExhaleFrame(),
+				_x, bubbleY, shade, 0, _mask, false};
+			renderLayer(layer, [&]() { tmpSurface->blitNShade(_dest, _x, bubbleY, shade, _mask); });
 		}
 	}
 	if (drawFacingIndicator && part == 0)
 	{
 		// draw unit facing indicator
 		auto* tmpSurface = _facingArrowSurface->getFrame(7 + ((unit->getDirection() + 1) % 8));
-		if (unit->getOriginalFaction() == FACTION_PLAYER)
-		{
-			tmpSurface->blitNShade(_dest, _x, _y, 0);
-		}
-		else
-		{
-			Surface::blitRaw(_dest, tmpSurface, _x, _y, 0, false, unit->getOriginalFaction() == FACTION_HOSTILE ? _blue : _red);
-		}
+		RenderLayer layer{tmpSurface, "DETBLOB.DAT", 7 + ((unit->getDirection() + 1) % 8),
+			_x, _y, 0, 0, GraphSubset(_dest->getWidth(), _dest->getHeight()), false};
+		layer.baseColor = unit->getOriginalFaction() == FACTION_PLAYER ? 0 :
+			(unit->getOriginalFaction() == FACTION_HOSTILE ? _blue : _red);
+		layer.hasMask = false;
+		renderLayer(layer, [&]() {
+			if (unit->getOriginalFaction() == FACTION_PLAYER)
+				tmpSurface->blitNShade(_dest, _x, _y, 0);
+			else
+				Surface::blitRaw(_dest, tmpSurface, _x, _y, 0, false, layer.baseColor);
+		});
 	}
-    });
 }
 
 /**

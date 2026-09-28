@@ -57,6 +57,8 @@ private:
 	Uint8 _cellColor, _selectorColor;
 	/// Updates the neighborFacility's build time. This is for internal use only (reCalcQueuedBuildings()).
 	void updateNeighborFacilityBuildTime(BaseFacility* facility, BaseFacility* neighbor);
+	/// Update UI hangar associations independently of either renderer.
+	void refreshCraftAssignments();
 public:
 	/// Creates a new base view at the specified position and size.
 	BaseView(int width, int height, int x = 0, int y = 0);
@@ -90,6 +92,7 @@ public:
 	void blink();
 	/// Draws the base view.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Blits the base view onto another surface.
 	void blit(SDL_Surface *surface) override;
 	/// Keeps the hover/placement selector in the same presentation transform as the grid.

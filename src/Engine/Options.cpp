@@ -123,9 +123,70 @@ void createOptionsOXC()
 	_info.push_back(OptionInfo(OPTION_OXC, "geoscapeScale", &geoscapeScale, 0));
 	_info.push_back(OptionInfo(OPTION_OXC, "battlescapeScale", &battlescapeScale, 0));
 	_info.push_back(OptionInfo(OPTION_OXC, "hdGraphics", &hdGraphics, true, "STR_HD_GRAPHICS_PIPELINE", "STR_GENERAL"));
-	// P10A: runtime/config switch for authored HD Battlescape environment grading.
-	// Kept out of the normal options UI for now; Ctrl+F8 toggles it in Battlescape.
+	// BEDROCK-only palette-derived environment grade switch. Non-BEDROCK authored HD uses the modern material-grade path.
+	// Toggled from the BEDROCK calibration popup; Ctrl+F8 is reserved for the clean debug-overlay switch.
 	_info.push_back(OptionInfo(OPTION_OXC, "hdEnvironmentGrade", &hdEnvironmentGrade, true));
+	// DEPTH LUMINANCE V1: independent BEDROCK luminance layer. It is deliberately
+	// separate from the colour grade; toggled from the BEDROCK calibration popup.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdDepthLuminance", &hdDepthLuminance, true));
+	// HD MATERIAL GRADE V1: modern true-colour semantic material grading for non-BEDROCK world assets.
+	// No Legacy palette/index semantics are involved. Ctrl+F5 opens the live calibrator.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdMaterialGrade", &hdMaterialGrade, true));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdMaterialGradeConfig", &hdMaterialGradeConfig, ""));
+	// BEDROCK CALIBRATION UI V1: live-editable material presentation coefficients.
+	// Stored as percentages so the UI can use integer sliders/text fields.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdBedrockLutTopPermille", &hdBedrockLutTopPermille, 480));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdBedrockLutVerticalPermille", &hdBedrockLutVerticalPermille, 540));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdBedrockLutCoveredPermille", &hdBedrockLutCoveredPermille, 290));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdBedrockLumaD1Permille", &hdBedrockLumaD1Permille, 1180));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdBedrockLumaD3Permille", &hdBedrockLumaD3Permille, 1060));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdFogEdgeSoftnessPermille", &hdFogEdgeSoftnessPermille, 480));
+	// HD LIGHTING CALIBRATION V1: artist-facing global multipliers. 1000 = neutral.
+	// They sit above per-asset/per-MCD authored settings, so future materials inherit them automatically.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdLocalLightsEnabled", &hdLocalLightsEnabled, true));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdLocalLightIntensityPermille", &hdLocalLightIntensityPermille, 1000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdLocalLightRadiusPermille", &hdLocalLightRadiusPermille, 1000));
+	// REAL HD LIGHTING V2: directional helmet light. Values are deliberately
+	// independent from OXCE LL_UNITS so personal light can remain gameplay data
+	// without acting as a 360-degree presentation aura.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdHelmetLightIntensityPermille", &hdHelmetLightIntensityPermille, 1000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdHelmetLightRangeMilliTiles", &hdHelmetLightRangeMilliTiles, 13000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdHelmetLightCoreHalfAngleMilliDeg", &hdHelmetLightCoreHalfAngleMilliDeg, 45000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdHelmetLightOuterHalfAngleMilliDeg", &hdHelmetLightOuterHalfAngleMilliDeg, 75000));
+	// Magnetic-Ion lateral emitter colour. Presentation only: these RGB coefficients
+	// never participate in FOV, detection, range or LOS decisions.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdHelmetMagneticLateralTintRPermille", &hdHelmetMagneticLateralTintRPermille, 900));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdHelmetMagneticLateralTintGPermille", &hdHelmetMagneticLateralTintGPermille, 970));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdHelmetMagneticLateralTintBPermille", &hdHelmetMagneticLateralTintBPermille, 1120));
+	// REAL HD FOV ARMOR V1: player perception half-angles. These are one
+	// configurable mechanism with four stock TFTD equipment profiles; the OXCE
+	// LOS/range/voxel rules remain authoritative after this sector gate.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdFovBaseHalfAngleMilliDeg", &hdFovBaseHalfAngleMilliDeg, 45000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdFovPlasticAquaHalfAngleMilliDeg", &hdFovPlasticAquaHalfAngleMilliDeg, 60000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdFovIonHalfAngleMilliDeg", &hdFovIonHalfAngleMilliDeg, 75000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdFovMagneticIonHalfAngleMilliDeg", &hdFovMagneticIonHalfAngleMilliDeg, 90000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdSurfaceSunlightEnabled", &hdSurfaceSunlightEnabled, true));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdSunlightIntensityPermille", &hdSunlightIntensityPermille, 1000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdShadowStrengthPermille", &hdShadowStrengthPermille, 1000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdAmbientLightPermille", &hdAmbientLightPermille, 1000));
+	// HD PROJECTED SHADOWS V1 calibration plumbing. The renderer patch consumes these
+	// raw values directly; keeping them in Options lets Ctrl+F7 remain the single artist bench.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdProjectedShadowsEnabled", &hdProjectedShadowsEnabled, false));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdProjectedShadowSoftnessPermille", &hdProjectedShadowSoftnessPermille, 1000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdProjectedShadowBiasPermille", &hdProjectedShadowBiasPermille, 1000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdProjectedShadowRangePermille", &hdProjectedShadowRangePermille, 1000));
+	// HD SMOKE VOLUME V1. Disabled by default until its visual pass is validated against Legacy smoke.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdSmokeVolumeEnabled", &hdSmokeVolumeEnabled, false));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdSmokeReplaceLegacy", &hdSmokeReplaceLegacy, false));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdSmokeOpacityPermille", &hdSmokeOpacityPermille, 1000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdSmokeRadiusPermille", &hdSmokeRadiusPermille, 1000));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdUnderwaterSmokeEnabled", &hdUnderwaterSmokeEnabled, true));
+	_info.push_back(OptionInfo(OPTION_OXC, "underwaterSmokeDissipation", &underwaterSmokeDissipation, 2));
+	// REAL HD FOV V1 master presentation switch. The historical serialized inset is
+	// retained for config compatibility only; V1 has no mono-Z screen-space envelope.
+	_info.push_back(OptionInfo(OPTION_OXC, "hdVisibilityInsetPermille", &hdVisibilityInsetPermille, 1500));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdFovAuditProbeEnabled", &hdFovAuditProbeEnabled, false));
+	_info.push_back(OptionInfo(OPTION_OXC, "hdDebugOverlay", &hdDebugOverlay, true));
 	_info.push_back(OptionInfo(OPTION_OXC, "hdDecorAnimationDesync", &hdDecorAnimationDesync, true, "STR_HD_DECOR_ANIMATION_DESYNC", "STR_BATTLESCAPE"));
 	_info.push_back(OptionInfo(OPTION_OXC, "battleUiScale", &battleUiScale, 1, "STR_HD_BATTLE_UI_SCALE", "STR_BATTLESCAPE"));
 	_info.push_back(OptionInfo(OPTION_OXC, "geoUiScale", &geoUiScale, 1, "STR_HD_GEO_UI_SCALE", "STR_GEOSCAPE"));

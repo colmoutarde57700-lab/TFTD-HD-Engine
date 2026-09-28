@@ -21,6 +21,7 @@
 
 namespace OpenXcom
 {
+class HdFontFace;
 
 /**
  * Number digits displayed on the screen.
@@ -34,6 +35,7 @@ private:
 	Surface *_borderedChars[10];
 	bool _bordered;
 	Uint8 _color;
+	std::unique_ptr<HdFontFace> _hdDigits, _hdBorderedDigits;
 public:
 	/// Creates a new number text with the specified size and position.
 	NumberText(int width, int height, int x = 0, int y = 0);
@@ -51,6 +53,7 @@ public:
 	void setPalette(const SDL_Color *colors, int firstcolor = 0, int ncolors = 256) override;
 	/// Draws the number text.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// sets this numbertext to have a border or not
 	void setBordered(bool bordered);
 

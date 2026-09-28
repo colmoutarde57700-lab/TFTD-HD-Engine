@@ -63,6 +63,8 @@ public:
 	void setPalette(const SDL_Color *colors, int firstcolor = 0, int ncolors = 256) override;
 	/// Blits the warning message.
 	void blit(SDL_Surface *surface) override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
+	void setDisplayScale(int scale, int anchorX = 0, int anchorY = 0) override;
 	/// Special handling for setting the height of the battlescape message.
 	void setHeight(int height) override;
 	/// Sets the text color of the battlescape message.

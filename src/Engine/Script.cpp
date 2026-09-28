@@ -3725,6 +3725,7 @@ bool ScriptParserBase::parseBase(ScriptContainerBase& destScript, const std::str
 				return false;
 			}
 			help.relese();
+			tempScript._defaultProgram = srcCode == getDefault();
 			destScript = std::move(tempScript);
 			return true;
 		}

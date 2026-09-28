@@ -1,3 +1,4 @@
+#include "HdRenderTrace.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -18,9 +19,15 @@
  */
 #include "State.h"
 #include "HdGpuBackend.h"
+#include "HdUiPicture.h"
+#include "PresentationSpaces.h"
+#include <SDL_rotozoom.h>
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <set>
+#include <typeinfo>
+#include <limits>
 #include "InteractiveSurface.h"
 #include "Game.h"
 #include "Screen.h"
@@ -29,6 +36,7 @@
 #include "LocalizedText.h"
 #include "Palette.h"
 #include "Options.h"
+#include "Logger.h"
 #include "../Engine/Sound.h"
 #include "../Engine/Collections.h"
 #include "../Mod/Mod.h"
@@ -54,7 +62,7 @@ Game* State::_game = 0;
  * By default states are full-screen.
  * @param game Pointer to the core game.
  */
-State::State() : _screen(true), _soundPlayed(false), _modal(0), _ruleInterface(0), _ruleInterfaceParent(0), _customSound(nullptr), _presentationScale(1)
+State::State() : _screen(true), _soundPlayed(false), _modal(0), _ruleInterface(0), _ruleInterfaceParent(0), _customSound(nullptr), _presentationScale(1), _uiFamily(UiFamily::Legacy), _uiFamilyTraceLogged(false), _uiFamilyCompositeLegacy(false), _uiFamilyCompositeCanvas(nullptr)
 {
 	// initialize palette to all black
 	memset(_palette, 0, sizeof(_palette));
@@ -66,6 +74,11 @@ State::State() : _screen(true), _soundPlayed(false), _modal(0), _ruleInterface(0
  */
 State::~State()
 {
+	if (_uiFamilyCompositeCanvas)
+	{
+		SDL_FreeSurface(_uiFamilyCompositeCanvas);
+		_uiFamilyCompositeCanvas = nullptr;
+	}
 	for (auto &pair : _hdPhysicalUiCache)
 	{
 		if (pair.second.surface) SDL_FreeSurface(pair.second.surface);
@@ -79,10 +92,116 @@ State::~State()
 	}
 }
 
+static const char *uiFamilyName(UiFamily family)
+{
+	switch (family)
+	{
+	case UiFamily::Global: return "Global";
+	case UiFamily::Battlescape: return "Battlescape";
+	case UiFamily::Geoscape: return "Geoscape";
+	case UiFamily::Aquanaut: return "Aquanaut";
+	default: return "Legacy";
+	}
+}
+
+void State::setUiFamily(UiFamily family)
+{
+	_uiFamily = family;
+	_uiFamilyTraceLogged = false;
+	if (_uiFamily != UiFamily::Legacy)
+	{
+		// A family-owned presentation space is authoritative. Do not stack the
+		// historical State::presentationScale on top of it.
+		_presentationScale = 1;
+	}
+	refreshPresentationScaleAnchors();
+	refreshUiFamilyInputTransforms();
+	Log(LOG_INFO) << "[UI-FAMILY V1-A][ASSIGN] state=" << typeid(*this).name()
+		<< " family=" << uiFamilyName(_uiFamily);
+}
+
+bool State::hasFixedUiFamilyPresentation() const
+{
+	// Explicit family presentation is currently active for Battlescape and
+	// Aquanaut. Geoscape/Global remain contracts for later migrations.
+	return Options::hdGraphics && (_uiFamily == UiFamily::Battlescape || _uiFamily == UiFamily::Aquanaut);
+}
+
+void State::getUiFamilyLogicalSize(int &width, int &height) const
+{
+	// Battlescape UI golden reference validated throughout the presentation
+	// spaces work: 640x360 logical -> 2560x1440 physical at x4.
+	if (_uiFamily == UiFamily::Battlescape)
+	{
+		width = 640;
+		height = 360;
+		return;
+	}
+	if (_uiFamily == UiFamily::Aquanaut)
+	{
+		// AQUANAUT_UI_FAMILY_V1_R2: Inventory content is authored at 320x200,
+		// but its validated x4 physical reference is that 320x200 layout centred
+		// inside the same 640x360 UI presentation viewport as Battlescape.
+		// The authored content is centred by centerAllSurfaces(); aquanautUiScale
+		// remains a family-local content scale around this viewport centre.
+		width = 640;
+		height = 360;
+		return;
+	}
+	width = Screen::ORIGINAL_WIDTH;
+	height = Screen::ORIGINAL_HEIGHT;
+}
+
+void State::refreshUiFamilyInputTransforms()
+{
+	if (!_game || !_game->getScreen()) return;
+	const bool enabled = hasFixedUiFamilyPresentation();
+	int uiW = 0, uiH = 0;
+	getUiFamilyLogicalSize(uiW, uiH);
+	const PresentationTransform ui = PresentationSpacesContract::uniformUiFit(
+		uiW, uiH, Options::displayWidth, Options::displayHeight);
+
+	// BATTLE_UI_FAMILY_V1-C1: a family can retain an independent content
+	// scale (e.g. minimapScale) without borrowing the World transform.
+	// Surface::blit scales around the family centre. The inverse input affine
+	// below maps physical pixels back into the ORIGINAL widget coordinates, so
+	// legacy Action math remains valid at contentScale 1..4.
+	const int contentScale = std::max(1, _presentationScale);
+	const double inputScaleX = ui.scaleX * contentScale;
+	const double inputScaleY = ui.scaleY * contentScale;
+	const double anchorX = uiW / 2.0;
+	const double anchorY = uiH / 2.0;
+	const int inputPhysicalX = (int)std::lround(ui.physicalContent.x + ui.scaleX * anchorX * (1.0 - contentScale));
+	const int inputPhysicalY = (int)std::lround(ui.physicalContent.y + ui.scaleY * anchorY * (1.0 - contentScale));
+
+	for (Surface *surface : _surfaces)
+	{
+		InteractiveSurface *interactive = dynamic_cast<InteractiveSurface*>(surface);
+		if (!interactive) continue;
+		if (enabled)
+		{
+			interactive->setPresentationInputTransform(
+				surface->getX(), surface->getY(), surface->getWidth(), surface->getHeight(),
+				inputPhysicalX, inputPhysicalY, inputScaleX, inputScaleY);
+		}
+		else
+		{
+			interactive->clearPresentationInputTransform();
+		}
+	}
+}
+
 void State::applyPresentationScaleToSurface(Surface *surface)
 {
 	if (!surface) return;
 	const int scale = std::max(1, _presentationScale);
+	if (_uiFamily != UiFamily::Legacy)
+	{
+		int uiW = 0, uiH = 0;
+		getUiFamilyLogicalSize(uiW, uiH);
+		surface->setDisplayScale(scale, uiW / 2, uiH / 2);
+		return;
+	}
 
 	// Scale ordinary menu/state surfaces as ONE coherent composition around
 	// the logical screen centre.  The previous per-surface top/centre/bottom
@@ -103,8 +222,12 @@ void State::refreshPresentationScaleAnchors()
 
 void State::setPresentationScale(int scale)
 {
+	// Legacy: historical State display scale. Explicit UiFamily: the same API
+	// becomes a FAMILY-LOCAL content scale inside the canonical UI canvas.
+	// It never changes World Space or Physical Display.
 	_presentationScale = std::max(1, scale);
 	refreshPresentationScaleAnchors();
+	refreshUiFamilyInputTransforms();
 }
 
 /**
@@ -115,13 +238,20 @@ void State::setPresentationScale(int scale)
  */
 void State::setInterface(const std::string& category, bool alterPal, SavedBattleGame *battleGame)
 {
+	_traceInterfaceCategory = category;
 	// HD/UI architecture: logical coordinates remain 320x200-era values while
 	// presentation scale is selected independently by screen family.
 	// A popup opened FROM Battlescape belongs to the Battlescape UI family,
 	// including the in-battle Options screens. This must take precedence over
 	// the generic "options" category or those popups remain microscopic while
 	// the tactical HUD is scaled.
-	if (battleGame)
+	if (_uiFamily == UiFamily::Battlescape)
+	{
+		// Explicit family beats all historical category/battleGame heuristics.
+		// Physical sizing is owned by PresentationSpacesContract.
+		_presentationScale = 1;
+	}
+	else if (battleGame)
 	{
 		_presentationScale = Options::getBattleUiScale();
 	}
@@ -151,6 +281,16 @@ void State::setInterface(const std::string& category, bool alterPal, SavedBattle
 	const int fitX = std::max(1, Options::baseXResolution / Screen::ORIGINAL_WIDTH);
 	const int fitY = std::max(1, Options::baseYResolution / Screen::ORIGINAL_HEIGHT);
 	_presentationScale = std::min(_presentationScale, std::max(1, std::min(fitX, fitY)));
+
+	// PRESENTATION_SPACES_TRACE_V1: observe the CURRENT heuristic without changing it.
+	Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][INTERFACE] state=" << typeid(*this).name()
+		<< " category=" << category
+		<< " battleGame=" << (battleGame ? 1 : 0)
+		<< " presentationScale=" << _presentationScale
+		<< " base=" << Options::baseXResolution << "x" << Options::baseYResolution
+		<< " ui(battle/geo/aqua)=" << Options::getBattleUiScale() << "/"
+		<< Options::getGeoUiScale() << "/" << Options::getAquanautUiScale()
+		<< " world(battle/geo)=" << Options::battlescapeScale << "/" << Options::geoscapeScale;
 
 	int backPal = -1;
 	std::string pal = "PAL_GEOSCAPE";
@@ -215,7 +355,7 @@ void State::setWindowBackground(Window *window, const std::string &s)
 void State::setWindowBackgroundImage(Window* window, const std::string& bgImageName)
 {
 	const auto* bgImage = _game->getMod()->getSurface(bgImageName);
-	window->setBackground(bgImage);
+	window->setBackground(bgImage, bgImageName);
 	if (window && !bgImageName.empty())
 	{
 		_hdExplicitSurfacePath[window] = "Resources/TFTD_HD/UI/Backgrounds/" + bgImageName + ".png";
@@ -329,6 +469,10 @@ void State::add(Surface *surface, const std::string &id, const std::string &cate
 		// this will initialize the graphics and settings of the battlescape button.
 		bsbtn->copy(parent);
 		bsbtn->initSurfaces();
+		if (Options::hdGraphics && parent && parent->hasHdPicture())
+			bsbtn->setHdPicture(parent->getHdPicture().cropped({
+				double(bsbtn->getX() - parent->getX()), double(bsbtn->getY() - parent->getY()),
+				double(bsbtn->getWidth()), double(bsbtn->getHeight())}));
 	}
 
 	// Set default text resources
@@ -381,6 +525,45 @@ void State::init()
 	_game->getFpsCounter()->setPalette(_palette);
 	_game->getFpsCounter()->setColor(_cursorColor);
 	_game->getFpsCounter()->draw();
+
+	// PRESENTATION_SPACES_TRACE_V1: snapshot the state composition in both the
+	// original logical coordinate system and the current per-surface display space.
+	// This is diagnostics only: no transform or surface property is changed here.
+	int logicalMinX = std::numeric_limits<int>::max();
+	int logicalMinY = std::numeric_limits<int>::max();
+	int logicalMaxX = std::numeric_limits<int>::min();
+	int logicalMaxY = std::numeric_limits<int>::min();
+	int displayMinX = std::numeric_limits<int>::max();
+	int displayMinY = std::numeric_limits<int>::max();
+	int displayMaxX = std::numeric_limits<int>::min();
+	int displayMaxY = std::numeric_limits<int>::min();
+	size_t visibleCount = 0;
+	for (Surface *surface : _surfaces)
+	{
+		if (!surface || !surface->isDisplayVisible()) continue;
+		++visibleCount;
+		logicalMinX = std::min(logicalMinX, surface->getX());
+		logicalMinY = std::min(logicalMinY, surface->getY());
+		logicalMaxX = std::max(logicalMaxX, surface->getX() + surface->getWidth());
+		logicalMaxY = std::max(logicalMaxY, surface->getY() + surface->getHeight());
+		const int ds = std::max(1, surface->getDisplayScale());
+		displayMinX = std::min(displayMinX, surface->getDisplayX());
+		displayMinY = std::min(displayMinY, surface->getDisplayY());
+		displayMaxX = std::max(displayMaxX, surface->getDisplayX() + surface->getWidth() * ds);
+		displayMaxY = std::max(displayMaxY, surface->getDisplayY() + surface->getHeight() * ds);
+	}
+	const Screen *traceScreen = _game->getScreen();
+	const PresentationContext &pc = traceScreen->getPresentationContext();
+	Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][STATE] state=" << typeid(*this).name()
+		<< " category=" << (_traceInterfaceCategory.empty() ? "<unset>" : _traceInterfaceCategory)
+		<< " pScale=" << _presentationScale
+		<< " surfaces=" << _surfaces.size() << " visible=" << visibleCount
+		<< " optionsBase=" << Options::baseXResolution << "x" << Options::baseYResolution
+		<< " pcLogical=" << pc.logicalWidth() << "x" << pc.logicalHeight()
+		<< " pcPhysical=" << pc.physicalWidth() << "x" << pc.physicalHeight()
+		<< " pcScale=" << pc.scaleX() << "x" << pc.scaleY()
+		<< (visibleCount ? (std::string(" logicalBounds=") + std::to_string(logicalMinX) + "," + std::to_string(logicalMinY) + "," + std::to_string(logicalMaxX) + "," + std::to_string(logicalMaxY)) : std::string(" logicalBounds=<none>"))
+		<< (visibleCount ? (std::string(" displayBounds=") + std::to_string(displayMinX) + "," + std::to_string(displayMinY) + "," + std::to_string(displayMaxX) + "," + std::to_string(displayMaxY)) : std::string(" displayBounds=<none>"));
 
 	// Highest priority: custom sound set explicitly in the code
 	// Medium priority: sound defined by the interface ruleset
@@ -437,6 +620,7 @@ void State::think()
  */
 void State::handle(Action *action)
 {
+	if (hasFixedUiFamilyPresentation()) refreshUiFamilyInputTransforms();
 	if (!_modal)
 	{
 		for (std::vector<Surface*>::reverse_iterator i = _surfaces.rbegin(); i != _surfaces.rend(); ++i)
@@ -462,6 +646,66 @@ void State::registerHdSurface(Surface *surface, const std::string &id, const std
 	_hdSurfaceMeta[surface] = { id, category };
 }
 
+std::string State::resolveHdUiOverride(Surface *surface)
+{
+    std::vector<std::string> names;
+    const auto explicitIt = _hdExplicitSurfacePath.find(surface);
+    if (explicitIt != _hdExplicitSurfacePath.end()) names.push_back(explicitIt->second);
+    const auto meta = _hdSurfaceMeta.find(surface);
+    if (meta != _hdSurfaceMeta.end())
+        names.push_back("Resources/TFTD_HD/UI/" + meta->second.category + "/" + meta->second.id + ".png");
+    for (const auto &prefix : {std::string("Resources/TFTD_HD/RealHD/"),
+        std::string("Resources/TFTD_HD/"), std::string("Resources/TFTD_HD/LegacyIndexed/")})
+    {
+        for (const auto &name : names)
+        {
+            const std::string base = "Resources/TFTD_HD/";
+            // Explicit custom paths stay authoritative for their own provider.
+            const std::string path = name.compare(0, base.size(), base) == 0 &&
+                name.compare(base.size(), 3, "UI/") == 0 ? prefix + name.substr(base.size()) :
+                (prefix == base ? name : std::string());
+            if (!path.empty() && _hdUiCache.usable(path))
+            {
+                hdTraceRoute("ui-override", name, hdProviderForPath(path), "selected=" + path);
+                return path;
+            }
+        }
+    }
+    return {};
+}
+
+void State::prewarmHdUiResources()
+{
+	if (!Options::hdGraphics || !hdUiMigrationEnabled()) return;
+
+	std::set<std::string> manifest;
+	for (Surface *surface : _surfaces)
+	{
+		if (!surface) continue;
+		auto explicitIt = _hdExplicitSurfacePath.find(surface);
+		if (explicitIt != _hdExplicitSurfacePath.end() && _hdUiCache.usable(explicitIt->second))
+		{
+			manifest.insert(explicitIt->second);
+			continue;
+		}
+		auto metaIt = _hdSurfaceMeta.find(surface);
+		if (metaIt == _hdSurfaceMeta.end()) continue;
+		const std::string path = "Resources/TFTD_HD/UI/" + metaIt->second.category + "/" + metaIt->second.id + ".png";
+		if (_hdUiCache.usable(path)) manifest.insert(path);
+	}
+
+	const Uint32 start = SDL_GetTicks();
+	size_t loaded = 0;
+	for (const std::string &path : manifest)
+	{
+		_hdUiCache.get(path);
+		++loaded;
+	}
+	Log(LOG_INFO) << "[HD-PREWARM V2] UI manifest=" << manifest.size()
+		<< " loaded=" << loaded << " ms=" << (SDL_GetTicks() - start);
+	_hdUiCache.markPrewarmComplete();
+}
+
 bool State::blitSurfaceWithHdOverride(Surface *surface, SDL_Surface *destination)
 {
 	if (!surface || !destination) return false;
@@ -470,31 +714,13 @@ bool State::blitSurfaceWithHdOverride(Surface *surface, SDL_Surface *destination
 		surface->blit(destination);
 		return false;
 	}
-	std::string path;
-	auto explicitIt = _hdExplicitSurfacePath.find(surface);
-	if (explicitIt != _hdExplicitSurfacePath.end() && _hdUiCache.exists(explicitIt->second))
-	{
-		path = explicitIt->second;
-	}
-	else
-	{
-		auto it = _hdSurfaceMeta.find(surface);
-		if (it != _hdSurfaceMeta.end())
-		{
-			path = "Resources/TFTD_HD/UI/" + it->second.category + "/" + it->second.id + ".png";
-		}
-	}
-	if (path.empty() || !_hdUiCache.exists(path))
+	const std::string path = resolveHdUiOverride(surface);
+	if (path.empty() || !_hdUiCache.usable(path))
 	{
 		surface->blit(destination);
 		return false;
 	}
-	HdImage *image = _hdUiCache.get(path);
-	if (!image)
-	{
-		surface->blit(destination);
-		return false;
-	}
+	HdImage *image = &_hdUiCache.require(path);
 	const int scale = std::max(1, surface->getDisplayScale());
 	HdImageCache::blit(destination, *image, surface->getDisplayX(), surface->getDisplayY(),
 		surface->getWidth() * scale, surface->getHeight() * scale, surface->getDisplayAlpha(), 0, nullptr, false);
@@ -504,24 +730,11 @@ bool State::blitSurfaceWithHdOverride(Surface *surface, SDL_Surface *destination
 bool State::blitSurfaceWithHdOverridePhysical(Surface *surface, SDL_Surface *destination, Screen *screen)
 {
 	if (!surface || !destination || !screen || !Options::hdGraphics || destination->format->BitsPerPixel != 32 || !surface->isDisplayVisible()) return false;
+	if (!hdUiMigrationEnabled()) return false;
 
-	std::string path;
-	auto explicitIt = _hdExplicitSurfacePath.find(surface);
-	if (explicitIt != _hdExplicitSurfacePath.end() && _hdUiCache.exists(explicitIt->second))
-	{
-		path = explicitIt->second;
-	}
-	else
-	{
-		auto it = _hdSurfaceMeta.find(surface);
-		if (it != _hdSurfaceMeta.end())
-		{
-			path = "Resources/TFTD_HD/UI/" + it->second.category + "/" + it->second.id + ".png";
-		}
-	}
-	if (path.empty() || !_hdUiCache.exists(path)) return false;
-	HdImage *image = _hdUiCache.get(path);
-	if (!image) return false;
+	const std::string path = resolveHdUiOverride(surface);
+	if (path.empty() || !_hdUiCache.usable(path)) return false;
+	HdImage *image = &_hdUiCache.require(path);
 
 	const int logicalScale = std::max(1, surface->getDisplayScale());
 	const int lx = surface->getDisplayX();
@@ -532,6 +745,26 @@ bool State::blitSurfaceWithHdOverridePhysical(Surface *surface, SDL_Surface *des
 	const int py = screen->logicalToPhysicalY(ly);
 	const int pw = std::max(1, screen->logicalToPhysicalX(lx2) - px);
 	const int ph = std::max(1, screen->logicalToPhysicalY(ly2) - py);
+
+	// Presentation Pipeline V1: authored HD UI no longer has to be resampled
+	// into a temporary SDL surface before it reaches D3D11. Submit the native
+	// PNG directly to the same physical presentation layer used by Legacy
+	// surfaces. CPU resampling below remains the exact fallback path.
+	HdGpuBackend &gpu = HdGpuBackend::instance();
+	if (gpu.frameActive())
+	{
+		HdGpuPresentationSprite sprite;
+		sprite.assetKey = path.c_str();
+		sprite.rgba = image->rgba.data();
+		sprite.imageWidth = image->width;
+		sprite.imageHeight = image->height;
+		sprite.destX = px;
+		sprite.destY = py;
+		sprite.destW = pw;
+		sprite.destH = ph;
+		sprite.opacity = surface->getDisplayAlpha();
+		if (gpu.drawPresentationSprite(sprite)) return true;
+	}
 
 	// TEST3/TEST6 UI cache: resample the PNG only when its physical target size
 	// changes. SDL then performs a single cached blit on every following frame.
@@ -578,7 +811,6 @@ bool State::blitSurfaceWithHdOverridePhysical(Surface *surface, SDL_Surface *des
 		SDL_SetAlpha(cached.surface, SDL_SRCALPHA, surface->getDisplayAlpha());
 	}
 	SDL_Rect dst = { (Sint16)px, (Sint16)py, 0, 0 };
-	HdGpuBackend &gpu = HdGpuBackend::instance();
 	if (gpu.isCpuOverlay(destination))
 	{
 		if (!gpu.blitCpuOverlay(cached.surface, px, py)) return false;
@@ -594,8 +826,153 @@ bool State::blitSurfaceWithHdOverridePhysical(Surface *surface, SDL_Surface *des
 	return true;
 }
 
+bool State::blitSurfaceInUiFamilyPhysical(Surface *surface, SDL_Surface *destination, Screen *screen)
+{
+	if (!surface || !destination || !screen || !surface->isDisplayVisible()) return false;
+	int uiW = 0, uiH = 0;
+	getUiFamilyLogicalSize(uiW, uiH);
+	const PresentationTransform ui = PresentationSpacesContract::uniformUiFit(
+		uiW, uiH, Options::displayWidth, Options::displayHeight);
+	const int contentScale = std::max(1, surface->getDisplayScale());
+	const PresentationRect logical = { surface->getDisplayX(), surface->getDisplayY(),
+		surface->getWidth() * contentScale, surface->getHeight() * contentScale };
+	const PresentationRect phys = ui.logicalToPhysical(logical);
+	if (phys.w <= 0 || phys.h <= 0) return false;
+	if (!hdUiMigrationEnabled())
+		return screen->blitNativeSurfaceAt(surface, destination, phys.x, phys.y, phys.w, phys.h);
+
+	const std::string path = resolveHdUiOverride(surface);
+
+	HdGpuBackend &gpu = HdGpuBackend::instance();
+	if (!path.empty() && _hdUiCache.usable(path))
+	{
+		HdImage *image = &_hdUiCache.require(path);
+		if (image)
+		{
+			if (gpu.frameActive())
+			{
+				HdGpuPresentationSprite sprite;
+				sprite.assetKey = path.c_str();
+				sprite.rgba = image->rgba.data();
+				sprite.imageWidth = image->width;
+				sprite.imageHeight = image->height;
+				sprite.destX = phys.x;
+				sprite.destY = phys.y;
+				sprite.destW = phys.w;
+				sprite.destH = phys.h;
+				sprite.opacity = surface->getDisplayAlpha();
+				if (gpu.drawPresentationSprite(sprite)) return true;
+			}
+			HdImageCache::blit(destination, *image, phys.x, phys.y, phys.w, phys.h,
+				surface->getDisplayAlpha(), 0, nullptr, false);
+			return true;
+		}
+	}
+
+	if (screen->tryBlitHdSurfaceAt(surface, destination, phys.x, phys.y, phys.w, phys.h)) return true;
+	if (Options::hdGraphics) return false; // Unmigrated OXCE widget stays absent.
+	if (screen->blitNativeSurfaceAt(surface, destination, phys.x, phys.y, phys.w, phys.h)) return true;
+	SDL_Surface *src = surface->getPresentationSurface();
+	if (!src || src->w <= 0 || src->h <= 0) return false;
+	if (gpu.isCpuOverlay(destination) && gpu.drawLegacySurface(src, surface,
+		phys.x, phys.y, phys.w, phys.h, surface->getDisplayAlpha()))
+	{
+		return true;
+	}
+
+	SDL_Surface *scaled = zoomSurface(src, (double)phys.w / (double)src->w,
+		(double)phys.h / (double)src->h, 0);
+	if (!scaled) return false;
+	if (src->flags & SDL_SRCCOLORKEY)
+	{
+		SDL_SetColorKey(scaled, SDL_SRCCOLORKEY, src->format->colorkey);
+	}
+	if (surface->getDisplayAlpha() < 255)
+	{
+		SDL_SetAlpha(scaled, SDL_SRCALPHA, surface->getDisplayAlpha());
+	}
+	if (gpu.isCpuOverlay(destination))
+	{
+		gpu.blitCpuOverlay(scaled, phys.x, phys.y);
+	}
+	else
+	{
+		SDL_Rect dst = { (Sint16)phys.x, (Sint16)phys.y, 0, 0 };
+		SDL_BlitSurface(scaled, nullptr, destination, &dst);
+	}
+	SDL_FreeSurface(scaled);
+	return true;
+}
+
+bool State::blitUiFamilyCompositePhysical(SDL_Surface *destination, Screen *screen)
+{
+	if (Options::hdGraphics) return false; // Native family raster is forbidden.
+	if (!destination || !screen) return false;
+	const bool fixed = hasFixedUiFamilyPresentation();
+	int uiW = screen->getSurface()->w, uiH = screen->getSurface()->h;
+	if (fixed) getUiFamilyLogicalSize(uiW, uiH);
+	if (uiW <= 0 || uiH <= 0) return false;
+
+	if (!_uiFamilyCompositeCanvas || _uiFamilyCompositeCanvas->w != uiW || _uiFamilyCompositeCanvas->h != uiH)
+	{
+		if (_uiFamilyCompositeCanvas) SDL_FreeSurface(_uiFamilyCompositeCanvas);
+		_uiFamilyCompositeCanvas = SDL_CreateRGBSurface(SDL_SWSURFACE, uiW, uiH, 8, 0, 0, 0, 0);
+		if (!_uiFamilyCompositeCanvas) return false;
+		SDL_SetColorKey(_uiFamilyCompositeCanvas, SDL_SRCCOLORKEY, 0);
+	}
+	if (_uiFamilyCompositeCanvas->format && _uiFamilyCompositeCanvas->format->palette)
+	{
+		SDL_SetPalette(_uiFamilyCompositeCanvas, SDL_LOGPAL | SDL_PHYSPAL, _palette, 0, 256);
+	}
+	SDL_FillRect(_uiFamilyCompositeCanvas, nullptr, 0);
+
+	// Rich Legacy controls (ComboBox, Slider, TextList...) often own visual
+	// children that are not registered in State::_surfaces. Calling their
+	// historical blit() onto a canonical UI canvas preserves those semantics
+	// exactly, while the canvas itself is no longer tied to World Space.
+	for (Surface *surface : _surfaces)
+	{
+		if (!surface || !surface->isDisplayVisible()) continue;
+		surface->blit(_uiFamilyCompositeCanvas);
+	}
+
+	const PresentationTransform ui = PresentationSpacesContract::uniformUiFit(
+		uiW, uiH, Options::displayWidth, Options::displayHeight);
+	const PresentationRect phys = fixed ? ui.physicalContent : PresentationRect{
+		screen->logicalToPhysicalX(0), screen->logicalToPhysicalY(0),
+		screen->logicalToPhysicalX(uiW) - screen->logicalToPhysicalX(0),
+		screen->logicalToPhysicalY(uiH) - screen->logicalToPhysicalY(0)};
+	if (phys.w <= 0 || phys.h <= 0) return false;
+
+	HdGpuBackend &gpu = HdGpuBackend::instance();
+	if (gpu.isCpuOverlay(destination) && gpu.drawLegacySurface(_uiFamilyCompositeCanvas, this,
+		phys.x, phys.y, phys.w, phys.h, 255))
+	{
+		return true;
+	}
+
+	SDL_Surface *scaled = zoomSurface(_uiFamilyCompositeCanvas,
+		(double)phys.w / (double)uiW, (double)phys.h / (double)uiH, 0);
+	if (!scaled) return false;
+	SDL_SetColorKey(scaled, SDL_SRCCOLORKEY, 0);
+	if (gpu.isCpuOverlay(destination))
+	{
+		gpu.blitCpuOverlay(scaled, phys.x, phys.y);
+	}
+	else
+	{
+		SDL_Rect dst = { (Sint16)phys.x, (Sint16)phys.y, 0, 0 };
+		SDL_BlitSurface(scaled, nullptr, destination, &dst);
+	}
+	SDL_FreeSurface(scaled);
+	return true;
+}
+
 void State::blit()
 {
+	// BATTLE_UI_FAMILY_V1-B: a family-owned overlay must not be baked into
+	// the variable World logical canvas. It is presented once in blitPhysical().
+	if (Options::hdGraphics) return;
 	SDL_Surface *destination = _game->getScreen()->getSurface();
 	const bool physicalHd = Options::hdGraphics;
 	for (auto* surface : _surfaces)
@@ -612,10 +989,42 @@ void State::blit()
 void State::blitPhysical(SDL_Surface *destination, Screen *screen, bool redrawLegacy)
 {
 	if (!Options::hdGraphics || !destination || !screen) return;
+	screen->setHdTraceContext(std::string(typeid(*this).name()) + ":" + _traceInterfaceCategory, hdUiMigrationEnabled());
+	if (!hdUiMigrationEnabled())
+	{
+		hdTraceRoute("ui-policy", std::string(typeid(*this).name()) + ":" + _traceInterfaceCategory,
+			"REAL_HD_MISSING", "Native family raster forbidden; migrate HD producer", true);
+	}
+	if (hasFixedUiFamilyPresentation())
+	{
+		if (!_uiFamilyTraceLogged)
+		{
+			int uiW = 0, uiH = 0;
+			getUiFamilyLogicalSize(uiW, uiH);
+			const PresentationTransform ui = PresentationSpacesContract::uniformUiFit(
+				uiW, uiH, Options::displayWidth, Options::displayHeight);
+			Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-B][CONFIG] state=" << typeid(*this).name()
+				<< " family=" << uiFamilyName(_uiFamily)
+				<< " uiLogical=" << uiW << "x" << uiH
+				<< " uiContent=" << ui.physicalContent.x << "," << ui.physicalContent.y << ","
+				<< ui.physicalContent.w << "x" << ui.physicalContent.h
+				<< " uiScale=" << ui.scaleX << "x" << ui.scaleY
+				<< " contentScale=" << std::max(1, _presentationScale)
+				<< " surfaces=" << _surfaces.size();
+			_uiFamilyTraceLogged = true;
+		}
+		// P2: each widget tries its HD producer, then a separately traced native fallback.
+		for (Surface *surface : _surfaces)
+		{
+			if (!surface || !surface->isDisplayVisible()) continue;
+			blitSurfaceInUiFamilyPhysical(surface, destination, screen);
+		}
+		return;
+	}
 	for (auto *surface : _surfaces)
 	{
 		if (!surface || !surface->isDisplayVisible()) continue;
-		if (!blitSurfaceWithHdOverridePhysical(surface, destination, screen) && redrawLegacy)
+		if (!blitSurfaceWithHdOverridePhysical(surface, destination, screen))
 		{
 			screen->blitSurfacePhysical(surface, false, destination);
 		}
@@ -720,12 +1129,25 @@ LocalizedText State::tr(const std::string &id, SoldierGender gender) const
  */
 void State::centerAllSurfaces()
 {
+	int dX = _game->getScreen()->getDX();
+	int dY = _game->getScreen()->getDY();
+	if (_uiFamily != UiFamily::Legacy)
+	{
+		// Explicit UI families centre against THEIR canonical canvas, never
+		// against the current World/Screen canvas.  For Aquanaut 320x200 this
+		// naturally yields 0,0; Battlescape keeps the validated +160,+80 shift.
+		int uiW = 0, uiH = 0;
+		getUiFamilyLogicalSize(uiW, uiH);
+		dX = (uiW - Screen::ORIGINAL_WIDTH) / 2;
+		dY = (uiH - Screen::ORIGINAL_HEIGHT) / 2;
+	}
 	for (auto* surface : _surfaces)
 	{
-		surface->setX(surface->getX() + _game->getScreen()->getDX());
-		surface->setY(surface->getY() + _game->getScreen()->getDY());
+		surface->setX(surface->getX() + dX);
+		surface->setY(surface->getY() + dY);
 	}
 	refreshPresentationScaleAnchors();
+	refreshUiFamilyInputTransforms();
 }
 
 /**
@@ -757,7 +1179,7 @@ void State::applyBattlescapeTheme(const std::string& category)
 		Window* window = dynamic_cast<Window*>(surface);
 		if (window)
 		{
-			window->setBackground(_game->getMod()->getSurface(altBg));
+			window->setBackground(_game->getMod()->getSurface(altBg), altBg);
 		}
 		TextList* list = dynamic_cast<TextList*>(surface);
 		if (list)
@@ -918,6 +1340,13 @@ void State::resize(int &dX, int &dY)
  */
 void State::recenter(int dX, int dY)
 {
+	if (_uiFamily == UiFamily::Battlescape)
+	{
+		// World canvas changes must not move a family-owned UI composition.
+		refreshPresentationScaleAnchors();
+		refreshUiFamilyInputTransforms();
+		return;
+	}
 	for (auto* surface : _surfaces)
 	{
 		surface->setX(surface->getX() + dX / 2);

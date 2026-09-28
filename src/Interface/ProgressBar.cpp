@@ -17,6 +17,9 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "ProgressBar.h"
+#include "../Engine/HdCanvas.h"
+#include <algorithm>
+#include <cmath>
 #include <SDL.h>
 
 namespace OpenXcom
@@ -93,6 +96,21 @@ int ProgressBar::getValue() const
  * Draws the bordered ProgressBar filled according
  * to its value.
  */
+void ProgressBar::composeHd(HdCanvas &canvas, HdImageCache &)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas bar(getWidth(), getHeight());
+	const double width = getWidth(), height = getHeight();
+	const auto border = getHdColor(_borderColor ? _borderColor : _color + 4);
+	bar.rectangle({0, 0, width, std::min(1.0, height)}, border);
+	bar.rectangle({0, std::max(0.0, height - 1), width, std::min(1.0, height)}, border);
+	bar.rectangle({0, 0, std::min(1.0, width), height}, border);
+	bar.rectangle({std::max(0.0, width - 1), 0, std::min(1.0, width), height}, border);
+	const double filled = std::max(0.0, std::floor(std::max(0.0, width - 2) * _value / 100.0));
+	bar.rectangle({1, 1, filled, std::max(0.0, height - 2)}, getHdColor(_color));
+	composeHdLayer(canvas, bar);
+}
+
 void ProgressBar::draw()
 {
 	Surface::draw();

@@ -1,3 +1,4 @@
+#include "HdRenderTrace.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -21,11 +22,14 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <thread>
 #include <sstream>
+#include <typeinfo>
 #include <SDL_mixer.h>
 #include "State.h"
 #include "Screen.h"
 #include "HdPerf.h"
+#include "HdGpuBackend.h"
 #include "Sound.h"
 #include "Music.h"
 #include "Language.h"
@@ -114,6 +118,7 @@ Game::Game(const std::string &title) : _screen(0), _cursor(0), _lang(0), _save(0
  */
 Game::~Game()
 {
+	hdTraceSummary();
 	Sound::stop();
 	Music::stop();
 
@@ -162,6 +167,8 @@ void Game::run()
 	FrameClock::time_point nextFrameDeadline = FrameClock::now();
 	int activeFrameLimit = -1;
 	uint64_t previousRenderedFrameUs = 0;
+	uint64_t pendingThinkUs = 0;
+	uint64_t pendingWaitUs = 0;
 
 	while (!_quit)
 	{
@@ -207,6 +214,14 @@ void Game::run()
 					if (reinterpret_cast<SDL_ActiveEvent*>(&_event)->state & ~SDL_APPMOUSEFOCUS)
 					{
 						Uint8 currentState = SDL_GetAppState();
+						Log(LOG_INFO) << "[AUDIO-TRACE V1][ACTIVE] gain="
+							<< (int)reinterpret_cast<SDL_ActiveEvent*>(&_event)->gain
+							<< " eventState=" << (int)reinterpret_cast<SDL_ActiveEvent*>(&_event)->state
+							<< " appState=" << (int)currentState
+							<< " backgroundMute=" << (Options::backgroundMute ? 1 : 0)
+							<< " playingAll=" << Mix_Playing(-1)
+							<< " ambient=" << Mix_Playing(3)
+							<< " musicPlaying=" << Mix_PlayingMusic();
 						// Game is minimized
 						if (!(currentState & SDL_APPACTIVE))
 						{
@@ -286,10 +301,24 @@ void Game::run()
 					// Go on, feed the event to others
 					FALLTHROUGH;
 				default:
+					// GEOSCAPE HD CAMERA V3: raw SDL cut-over. The HD globe owns RMB
+					// drag before Action/State/InteractiveSurface transforms can reach the
+					// Legacy Globe. Global screen/cursor handling still runs so the pointer
+					// remains responsive. Keyboard (including ESC) is never consumed.
+					bool hdGeoscapeRawConsumed = false;
+					if (!_states.empty())
+					{
+						if (GeoscapeState *geo = dynamic_cast<GeoscapeState*>(_states.back()))
+						{
+							hdGeoscapeRawConsumed = geo->handleHdGlobeRawEvent(_event);
+						}
+					}
 					Action action = Action(&_event, _screen->getXScale(), _screen->getYScale(), _screen->getCursorTopBlackBand(), _screen->getCursorLeftBlackBand());
 					_screen->handle(&action);
 					_cursor->handle(&action);
-					_fpsCounter->handle(&action);
+					// Ctrl+F7 belongs to the native REAL HD tuning panel. Do not
+					// let the upstream FPS widget intercept it first.
+					if (!Options::hdGraphics) _fpsCounter->handle(&action);
 					if (action.getDetails()->type == SDL_KEYDOWN)
 					{
 						// "ctrl-g" grab input
@@ -330,7 +359,10 @@ void Game::run()
 							}
 						}
 					}
-					_states.back()->handle(&action);
+					if (!hdGeoscapeRawConsumed)
+					{
+						_states.back()->handle(&action);
+					}
 					break;
 			}
 			if (!_init)
@@ -345,8 +377,10 @@ void Game::run()
 		if (runningState != PAUSED)
 		{
 			// Process logic
+			const uint64_t thinkStartUs = hdPerfNowUs();
 			_states.back()->think();
 			_fpsCounter->think();
+			pendingThinkUs += hdPerfNowUs() - thinkStartUs;
 			const bool frameLimiterEnabled = Options::FPS > 0 && !(Options::useOpenGL && Options::vSyncForOpenGL);
 			const int requestedFrameLimit = frameLimiterEnabled
 				? (SDL_GetAppState() & SDL_APPINPUTFOCUS ? Options::FPS : Options::FPSInactive)
@@ -373,20 +407,34 @@ void Game::run()
 				auto &hdPerf = getHdPerfStats();
 				hdPerf.beginFrame();
 				const uint64_t perfFrameStart = hdPerfNowUs();
+				hdPerf.current.loopThinkUs = pendingThinkUs;
+				hdPerf.current.loopWaitUs = pendingWaitUs;
+				pendingThinkUs = pendingWaitUs = 0;
 
 				if (requestedFrameLimit > 0)
 				{
 					const double targetUs = 1000000.0 / (double)requestedFrameLimit;
 					hdPerf.current.frameTargetUs = (uint64_t)std::llround(targetUs);
+					if (pacingNow > nextFrameDeadline)
+						hdPerf.current.deadlineLatenessUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(pacingNow - nextFrameDeadline).count();
 					if (previousRenderedFrameUs != 0)
 					{
 						const uint64_t intervalUs = perfFrameStart - previousRenderedFrameUs;
-						// Ignore focus/pause/debugger discontinuities in the pacing EMA.
-						if (intervalUs <= hdPerf.current.frameTargetUs * 8ULL)
+						// A slow rendered frame is still a frame: discarding it made the
+						// displayed FPS rise into the thousands during Big Map stalls.
+						// Only suppress multi-second focus/debugger discontinuities.
+						if (intervalUs <= 2000000ULL)
 						{
 							hdPerf.current.frameIntervalUs = intervalUs;
 							const int64_t delta = (int64_t)intervalUs - (int64_t)hdPerf.current.frameTargetUs;
 							hdPerf.current.framePacingErrorUs = (uint64_t)(delta < 0 ? -delta : delta);
+						}
+						else
+						{
+							// Hold the previous reading instead of feeding zero to the EMA.
+							hdPerf.current.frameIntervalUs = hdPerf.avg.frameIntervalUs > 0.0
+								? (uint64_t)std::llround(hdPerf.avg.frameIntervalUs)
+								: hdPerf.current.frameTargetUs;
 						}
 					}
 
@@ -409,6 +457,15 @@ void Game::run()
 				const uint64_t perfClearStart = hdPerfNowUs();
 				_screen->clear();
 				hdPerf.current.clearUs = hdPerfNowUs() - perfClearStart;
+
+				// WORLD_GPU_V1 preflight.  This happens before State::blit()/Map::draw(),
+				// so the Battlescape can safely choose command emission instead of CPU
+				// rasterization only when the D3D11 device/shaders and both frame buffers
+				// are already known to be available for this exact frame geometry.
+				if (Options::hdGraphics && !Screen::useOpenGL())
+					HdGpuBackend::instance().preparePresentationFrame(_screen->getDisplaySurface(), _screen->getSurface());
+				else
+					HdGpuBackend::instance().preparePresentationFrame(nullptr, nullptr);
 				std::list<State*>::iterator i = _states.end();
 				do
 				{
@@ -423,7 +480,7 @@ void Game::run()
 					(*i)->blit();
 					renderedStates.push_back(*i);
 				}
-				_fpsCounter->blit(_screen->getSurface());
+				if (!Options::hdGraphics) _fpsCounter->blit(_screen->getSurface());
 				hdPerf.current.statesBlitUs = hdPerfNowUs() - perfStatesStart;
 
 				const bool physicalHd = Options::hdGraphics;
@@ -441,7 +498,9 @@ void Game::run()
 							state->blitPhysical(display, _screen, physicalMapSeen);
 							if (state->hasPhysicalMapLayer()) physicalMapSeen = true;
 						}
-						_screen->blitSurfacePhysical(_fpsCounter, false, display);
+						// REAL HD owns its performance panel. The historical OXCE FPS
+						// widget is never composited into the physical HD frame.
+						_screen->setHdTraceContext("Global:Cursor", true);
 						_screen->blitSurfacePhysical(_cursor, true, display);
 					});
 				}
@@ -453,25 +512,67 @@ void Game::run()
 
 				hdPerf.current.renderUs = hdPerfNowUs() - perfFrameStart;
 				hdPerf.endFrame();
+				#ifdef REAL_HD_DEEP_DIAGNOSTICS
+				if (Options::hdGraphics && hdPerf.completedFrames % 600ULL == 0ULL) hdTraceSummary();
 				if (Options::hdGraphics && (hdPerf.completedFrames % 120ULL) == 0ULL)
 				{
 					const auto &a = hdPerf.avg;
-					Log(LOG_INFO) << "[HD-PERF RC12-P10 NATIVE ENV GRADE] frame=" << a.renderUs/1000.0 << "ms"
+					Log(LOG_INFO) << "[HD-PERF RC12 MISSION RESOURCE PREWARM V2] frame=" << a.renderUs/1000.0 << "ms"
 						<< " states=" << a.statesBlitUs/1000.0 << "ms"
 						<< " scale=" << a.scaleUs/1000.0 << "ms"
+						<< " baseUp=" << a.gpuBaseUploadUs/1000.0 << "ms"
+						<< " baseGPU=" << a.gpuBasePresentUs/1000.0 << "ms"
+						<< " presGPU=" << a.presentationGpuUs/1000.0 << "ms/" << a.presentationGpuDraws
+						<< " legacyGPU=" << a.presentationLegacyGpuUs/1000.0 << "ms/" << a.presentationLegacyGpuDraws
+						<< " scaleBypass=" << a.cpuScaleBypassedPct << "%"
 						<< " phys=" << a.physicalPassUs/1000.0 << "ms"
 						<< " gpu=" << a.gpuOverlayUs/1000.0 << "ms"
 						<< " flip=" << a.sdlFlipUs/1000.0 << "ms"
 						<< " pace=" << a.frameIntervalUs/1000.0 << "/" << a.frameTargetUs/1000.0 << "ms"
 						<< " paceErr=" << a.framePacingErrorUs/1000.0 << "ms"
+						<< " think=" << a.loopThinkUs/1000.0 << "ms"
+						<< " wait=" << a.loopWaitUs/1000.0 << "ms"
+						<< " late=" << a.deadlineLatenessUs/1000.0 << "ms"
 						<< " mapL=" << a.mapLogicalBlitUs/1000.0 << "ms"
 						<< " hudL=" << a.hudLogicalBlitUs/1000.0 << "ms"
 						<< " mapP=" << a.mapPhysicalUs/1000.0 << "ms"
 						<< " mapGpuSub=" << a.mapGpuSubmitUs/1000.0 << "ms"
+						<< " bedSub=" << a.mapBedrockSubmitUs/1000.0 << "ms/" << a.mapBedrockDraws
+						<< " sprSub=" << a.mapSpriteSubmitUs/1000.0 << "ms/" << a.mapSpriteDraws
+						<< " lightSub=" << a.mapLocalLightSubmitUs/1000.0 << "ms"
+						<< " smokeSub=" << a.mapSmokeSubmitUs/1000.0 << "ms"
+						<< " beginMap=" << a.mapBeginMapUs/1000.0 << "ms"
+						<< " lightBuild=" << a.mapLocalLightBuildUs/1000.0 << "ms"
+						<< " smokeBuild=" << a.mapSmokeBuildUs/1000.0 << "ms"
+						<< " bedOwner=" << a.mapBedrockOwnerUs/1000.0 << "ms"
+						<< " maskPrep=" << a.mapImpactMaskPrepUs/1000.0 << "ms"
+						<< " maskScans=" << a.mapImpactMaskScans << "/" << (a.mapImpactMaskScanPixels/1000000.0) << "Mpx"
+						<< " maskBoundsCache=" << a.mapImpactBoundsCacheHits
+						<< " helmetBuild=" << a.mapHelmetLightBuildUs/1000.0 << "ms/" << a.mapHelmetLightRebuilds
+						<< " helmetSamples=" << a.mapHelmetLightCandidateSamples
+						<< " helmetCells=" << a.mapHelmetLightFieldCells
+						<< " ramImg=" << (a.mapImageCpuCacheBytes/(1024.0*1024.0)) << "MiB/" << a.mapImageCpuCacheCount
+						<< " vramImg=" << (HdGpuBackend::instance().estimatedCachedHdImageBytes()/(1024.0*1024.0)) << "MiB/" << HdGpuBackend::instance().cachedHdImageCount()
+						<< " vramTracked=" << (HdGpuBackend::instance().estimatedTrackedGpuBytes()/(1024.0*1024.0)) << "MiB"
+						<< " trueGPU=" << (HdGpuBackend::instance().lastTrueGpuFrameUs()/1000.0) << "/" << (HdGpuBackend::instance().lastTrueGpuMapUs()/1000.0) << "ms"
+						<< " gpuTs=" << (HdGpuBackend::instance().hasTrueGpuTiming() ? "OK" : "WAIT")
+						<< "/" << HdGpuBackend::instance().resolvedTrueGpuTimingFrames()
+						<< "/" << HdGpuBackend::instance().pendingTrueGpuTimingFrames()
+						<< "/drop" << HdGpuBackend::instance().droppedTrueGpuTimingFrames()
+						<< " impactRebuild=" << a.mapImpactFieldRebuildUs/1000.0 << "ms"
+						<< " bedGeo=" << a.mapBedrockGeometryUs/1000.0 << "ms"
+						<< " worldReplay=" << a.mapWorldReplayUs/1000.0 << "ms"
+						<< " postFx=" << a.mapPostFxUs/1000.0 << "ms"
+						<< " worldHD=" << a.mapHdGpuCommands
+						<< " worldLegacyGPU=" << a.mapLegacyGpuCommands
+						<< " worldLegacyCPU=" << a.mapCpuLegacyBlits
+						<< " resolve=" << a.mapResolveUs/1000.0 << "ms/" << a.mapResolveQueries
+						<< " hit=" << (a.mapResolveQueries > 0.0 ? (100.0 * a.mapResolveCacheHits / a.mapResolveQueries) : 0.0) << "%"
 						<< " hudP=" << a.hudPhysicalBlitUs/1000.0 << "ms"
 						<< " cacheHit=" << a.mapCacheHitPct << "%"
 						<< " mapRedraw=" << a.mapRedrawPct << "%";
 				}
+				#endif
 			}
 		}
 
@@ -479,7 +580,26 @@ void Game::run()
 		switch (runningState)
 		{
 			case RUNNING:
-				SDL_Delay(1); //Save CPU from going 100%
+				if (activeFrameLimit > 0)
+				{
+					// Sleep for the coarse part of the remaining frame period,
+					// then yield only for the short tail. A fixed SDL_Delay(1)
+					// in every polling iteration adds scheduler jitter at 120 FPS.
+					const uint64_t waitStartUs = hdPerfNowUs();
+					// Wait through the deadline. Waking one millisecond early
+					// caused hundreds of redundant battle think calls per frame.
+					const auto wakeDeadline = nextFrameDeadline;
+					auto remaining = wakeDeadline - FrameClock::now();
+					if (remaining > std::chrono::milliseconds(3))
+					{
+						const auto coarseMs = std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count() - 2;
+						if (coarseMs > 0) SDL_Delay((Uint32)coarseMs);
+					}
+					while (FrameClock::now() < wakeDeadline)
+						std::this_thread::yield();
+					pendingWaitUs += hdPerfNowUs() - waitStartUs;
+				}
+				else SDL_Delay(1);
 				break;
 			case SLOWED: case PAUSED:
 				SDL_Delay(100); break; //More slowing down.
@@ -515,6 +635,13 @@ void Game::quit()
  */
 void Game::setVolume(int sound, int music, int ui)
 {
+	Log(LOG_INFO) << "[AUDIO-TRACE V1][SET-VOLUME] sound=" << sound
+		<< " music=" << music << " ui=" << ui
+		<< " mute=" << (Options::mute ? 1 : 0)
+		<< " backgroundMute=" << (Options::backgroundMute ? 1 : 0)
+		<< " playingAll=" << Mix_Playing(-1)
+		<< " ambient=" << Mix_Playing(3)
+		<< " musicPlaying=" << Mix_PlayingMusic();
 	if (!Options::mute)
 	{
 		if (sound >= 0)
@@ -575,6 +702,9 @@ void Game::setState(State *state)
  */
 void Game::pushState(State *state)
 {
+	Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][STATE-PUSH] depth=" << _states.size()
+		<< "->" << (_states.size() + 1)
+		<< " state=" << (state ? typeid(*state).name() : "<null>");
 	_states.push_back(state);
 	_init = false;
 }
@@ -587,7 +717,11 @@ void Game::pushState(State *state)
  */
 void Game::popState()
 {
-	_deleted.push_back(_states.back());
+	State *traceState = _states.back();
+	Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][STATE-POP] depth=" << _states.size()
+		<< "->" << (_states.size() - 1)
+		<< " state=" << (traceState ? typeid(*traceState).name() : "<null>");
+	_deleted.push_back(traceState);
 	_states.pop_back();
 	_init = false;
 }
@@ -607,6 +741,8 @@ void Game::setSavedGame(SavedGame *save)
  */
 void Game::loadMods()
 {
+	_screen->getHdCanvasImages().clear();
+	_screen->discardHdCanvas();
 	Mod::resetGlobalStatics();
 	delete _mod;
 	_mod = new Mod();

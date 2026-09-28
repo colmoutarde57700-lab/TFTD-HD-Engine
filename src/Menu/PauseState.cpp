@@ -45,6 +45,12 @@ namespace OpenXcom
 PauseState::PauseState(OptionsOrigin origin) : _origin(origin)
 {
 	_screen = false;
+	if (_origin == OPT_BATTLESCAPE)
+	{
+		// BATTLE_UI_FAMILY_V1-A: explicit family assignment, not category/name
+		// inference. The tactical Pause menu now owns a fixed UI Space.
+		setUiFamily(UiFamily::Battlescape);
+	}
 
 	int x;
 	if (_origin == OPT_GEOSCAPE)

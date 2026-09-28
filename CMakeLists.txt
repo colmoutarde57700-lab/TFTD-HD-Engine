@@ -242,3 +242,17 @@ endif ()
 
 add_subdirectory ( docs )
 add_subdirectory ( src )
+
+# REAL HD forbids every OXCE/native pixel presentation path. This guard is a
+# required dependency of the executable, not an optional diagnostic test.
+add_custom_target(real_hd_pixel_firewall
+  COMMAND ${CMAKE_COMMAND} -DHD_SOURCE_ROOT=${CMAKE_SOURCE_DIR}
+    -P ${CMAKE_SOURCE_DIR}/cmake/VerifyRealHdPixelFirewall.cmake
+  VERBATIM)
+add_dependencies(openxcom real_hd_pixel_firewall)
+
+option(BUILD_HD_CONTRACT_TESTS "Build renderer-neutral HD contract and rasterizer tests" OFF)
+if(BUILD_HD_CONTRACT_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

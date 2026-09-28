@@ -1,12 +1,54 @@
+#include "HdRenderTrace.h"
 #include "HdImage.h"
+#include "HdPngIndices.h"
 #include "FileMap.h"
 #include "Logger.h"
+#include "Exception.h"
 #include "../lodepng.h"
 #include <algorithm>
 #include <cstring>
 
 namespace OpenXcom
 {
+
+HdAssetResolution HdImageCache::resolve(const HdAssetKey &key, const std::vector<HdAssetCandidate> &candidates, bool traceMissing)
+{
+	auto result = hdResolveAsset(key, candidates, [this](const std::string &path)
+	{
+		if (!exists(path)) return HdAssetAvailability::Absent;
+		return get(path) ? HdAssetAvailability::Ready : HdAssetAvailability::Invalid;
+	});
+	std::string trail;
+	for (const auto &attempt : result.attempted) trail += attempt.path + ";";
+	for (const auto &invalid : result.invalid)
+		hdTraceRoute("asset", key.family + ":" + std::to_string(key.frame),
+			result ? hdAssetProviderName(result.asset.provider) : "UNRESOLVED",
+			"invalid=" + invalid.path + " attempts=" + trail);
+	// Candidate chains such as inventory portraits probe several legal OXCE names.
+	// A missing intermediate candidate is not a final HD failure; callers can mute
+	// that probe while still logging the provider that eventually succeeds.
+	if (result || traceMissing)
+		hdTraceRoute("asset", key.family + ":" + std::to_string(key.frame),
+			result ? hdAssetProviderName(result.asset.provider) : "UNRESOLVED", "attempts=" + trail);
+	return result;
+}
+
+HdImage &HdImageCache::require(const std::string &path)
+{
+	if (HdImage *image = get(path)) return *image;
+	const std::string reason = exists(path) ? "INVALID_RESOURCE" : "MISSING_RESOURCE";
+	const std::string message = "[HD RESOURCE ERROR][" + reason + "] " + path;
+	hdTraceRoute("asset-read", path, "UNRESOLVED", message);
+	throw Exception(message);
+}
+
+bool HdImageCache::usable(const std::string &path)
+{
+    if (!exists(path)) return false;
+    if (get(path)) return true;
+    hdTraceRoute("asset", path, "TRY_NEXT_PROVIDER", "PNG exists but cannot be decoded");
+    return false;
+}
 
 bool HdImageCache::exists(const std::string &path)
 {
@@ -51,31 +93,38 @@ HdImage *HdImageCache::get(const std::string &path)
 	}
 
 	unsigned w = 0, h = 0;
-	// P8 inspects the PNG without colour conversion first only to preserve its
-	// storage representation. Storage is NOT colour semantics: palette PNGs
-	// are also decoded to RGBA and default to Environment like any authored art.
+	// Inspect the header before allocating decoded pixels. The old path fully
+	// inflated every RGB/RGBA PNG in its native format and then inflated it a
+	// second time to RGBA. REAL HD materials can exceed 5000 pixels per side,
+	// so the second full decode costs both startup time and substantial peak RAM.
+	// Palette files still need the native decode to preserve their indices.
 	lodepng::State state;
-	state.decoder.color_convert = 0;
-	std::vector<unsigned char> raw;
-	unsigned error = lodepng::decode(raw, w, h, state, png);
+	unsigned error = lodepng_inspect(&w, &h, &state, png.data(), png.size());
 	if (error)
 	{
-		Log(LOG_WARNING) << "HD PNG decode failed (" << error << ") for " << path << ": " << lodepng_error_text(error);
+		Log(LOG_WARNING) << "HD PNG header failed (" << error << ") for " << path << ": " << lodepng_error_text(error);
 		return nullptr;
 	}
 	entry.width = w;
 	entry.height = h;
-	entry.paletteIndexed8 = state.info_png.color.colortype == LCT_PALETTE && state.info_png.color.bitdepth == 8;
+	entry.paletteIndexed8 = state.info_png.color.colortype == LCT_PALETTE;
 
 	if (entry.paletteIndexed8)
 	{
+		state.decoder.color_convert = 0;
+		std::vector<unsigned char> raw;
+		error = lodepng::decode(raw, w, h, state, png);
+		if (error)
+		{
+			Log(LOG_WARNING) << "HD indexed PNG decode failed (" << error << ") for " << path << ": " << lodepng_error_text(error);
+			return nullptr;
+		}
 		const size_t pixelCount = (size_t)w * h;
-		if (raw.size() < pixelCount)
+		if (!hdUnpackPngIndices(raw, pixelCount, state.info_png.color.bitdepth, entry.indices))
 		{
 			Log(LOG_WARNING) << "HD indexed PNG has unexpected raw size for " << path;
 			return nullptr;
 		}
-		entry.indices.assign(raw.begin(), raw.begin() + pixelCount);
 		entry.rgba.resize(pixelCount * 4u);
 		const LodePNGColorMode &color = state.info_png.color;
 		for (size_t i = 0; i < pixelCount; ++i)
@@ -90,9 +139,8 @@ HdImage *HdImageCache::get(const std::string &path)
 	}
 	else
 	{
-		// The raw buffer may be RGB, grayscale or another PNG-native mode.
-		// Decode once more to the canonical RGBA representation used by the
-		// existing software compositor and by true-colour GPU textures.
+		// Decode directly to canonical RGBA once. Storage colour type was read
+		// from IHDR, so no native-pixel staging buffer is needed here.
 		entry.rgba.clear();
 		error = lodepng::decode(entry.rgba, w, h, png);
 		if (error)
@@ -109,33 +157,103 @@ HdImage *HdImageCache::get(const std::string &path)
 	entry.alphaRowMinX.assign(h, w);
 	entry.alphaRowMaxX.assign(h, 0);
 	entry.hasVisiblePixels = false;
+	entry.influenceMinX = w;
+	entry.influenceMinY = h;
+	entry.influenceMaxX = 0;
+	entry.influenceMaxY = 0;
+	entry.hasInfluencePixels = false;
 	for (unsigned y = 0; y < h; ++y)
 	{
 		unsigned minX = w;
 		unsigned maxX = 0;
 		for (unsigned x = 0; x < w; ++x)
 		{
-			if (entry.rgba[((size_t)y * w + x) * 4 + 3] != 0)
+			const size_t pi = ((size_t)y * w + x) * 4u;
+			const unsigned a = entry.rgba[pi + 3];
+			if (a != 0)
 			{
 				minX = std::min(minX, x);
 				maxX = std::max(maxX, x + 1);
+			}
+
+			// Preserve the exact former ImpactMaskBounds threshold:
+			// influence = luma(RGB) * alpha / 255, accepted when >= 4.
+			const unsigned r = entry.rgba[pi + 0];
+			const unsigned g = entry.rgba[pi + 1];
+			const unsigned b = entry.rgba[pi + 2];
+			const unsigned luma = (54u * r + 183u * g + 19u * b) >> 8;
+			const unsigned influence = (luma * a + 127u) / 255u;
+			if (influence >= 4u)
+			{
+				entry.hasInfluencePixels = true;
+				entry.influenceMinX = std::min(entry.influenceMinX, x);
+				entry.influenceMinY = std::min(entry.influenceMinY, y);
+				entry.influenceMaxX = std::max(entry.influenceMaxX, x);
+				entry.influenceMaxY = std::max(entry.influenceMaxY, y);
 			}
 		}
 		entry.alphaRowMinX[y] = minX;
 		entry.alphaRowMaxX[y] = maxX;
 		if (minX < maxX) entry.hasVisiblePixels = true;
 	}
+	if (!entry.hasInfluencePixels && w && h)
+	{
+		// Match the old per-frame fallback for a valid but fully sub-threshold mask.
+		entry.influenceMinX = entry.influenceMinY = 0;
+		entry.influenceMaxX = w - 1u;
+		entry.influenceMaxY = h - 1u;
+	}
 
 	entry.loaded = true;
-	Log(LOG_INFO) << "[HD] loaded " << path << " -> " << w << "x" << h
-		<< (entry.paletteIndexed8 ? " PALETTE8+RGBA" : " RGBA");
+	hdTraceRoute("asset", path, hdProviderForPath(path), "PNG decoded");
+	if (_prewarmComplete)
+	{
+		++_postPrewarmLoads;
+		Log(LOG_INFO) << "[HD-PREWARM LATE-LOAD] #" << _postPrewarmLoads << " resource=" << path << " reason=NOT_IN_INITIAL_MANIFEST status=FOUND_DECODED_CACHED";
+	}
+	const FileMap::FileRecord *provider = FileMap::at(path);
+	// Share the bounded trace registry across image-cache instances. Releasing
+	// one cache must not reopen an unlimited per-glyph logging path.
+	hdTraceRoute("asset-load", path, hdProviderForPath(path),
+		std::to_string(w) + "x" + std::to_string(h) +
+		(entry.paletteIndexed8 ? " PALETTE8+RGBA" : " RGBA") +
+		" pngBitDepth=" + std::to_string(state.info_png.color.bitdepth) +
+		" provider=" + (provider ? provider->fullpath : std::string("<unknown>")));
 	return &entry;
+}
+
+
+size_t HdImageCache::imageCount() const
+{
+	size_t count = 0;
+	for (const auto &pair : _images) if (pair.second.loaded) ++count;
+	return count;
+}
+
+std::uint64_t HdImageCache::estimatedCpuBytes() const
+{
+	std::uint64_t bytes = 0;
+	for (const auto &pair : _images)
+	{
+		const HdImage &image = pair.second;
+		if (!image.loaded) continue;
+		bytes += sizeof(HdImage);
+		bytes += image.rgba.size() * sizeof(unsigned char);
+		bytes += image.indices.size() * sizeof(unsigned char);
+		bytes += image.alphaRowMinX.size() * sizeof(unsigned);
+		bytes += image.alphaRowMaxX.size() * sizeof(unsigned);
+		bytes += pair.first.size();
+	}
+	return bytes;
 }
 
 void HdImageCache::clear()
 {
+	++_generation;
 	_images.clear();
 	_exists.clear();
+	_prewarmComplete = false;
+	_postPrewarmLoads = 0;
 }
 
 void HdImageCache::blit(SDL_Surface *destination, const HdImage &image,

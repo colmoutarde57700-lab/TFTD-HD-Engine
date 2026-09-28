@@ -57,6 +57,7 @@ public:
 	void fade();
 	/// Draws the message.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 };
 
 }

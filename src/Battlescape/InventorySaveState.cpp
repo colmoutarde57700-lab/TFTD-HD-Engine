@@ -39,6 +39,13 @@ namespace OpenXcom
 */
 InventorySaveState::InventorySaveState(InventoryState *parent) : _parent(parent), _previousSelectedRow(-1), _selectedRow(-1)
 {
+	// AQUANAUT_UI_FAMILY_V1-B: this screen is owned by Inventory and must
+	// stay in the same Aquanaut presentation space/content scale.
+	setUiFamily(UiFamily::Aquanaut);
+	setPresentationScale(Options::getAquanautUiScale());
+	Log(LOG_INFO) << "[AQUANAUT-UI FAMILY V1-B][ASSIGN] state=InventorySaveState family=Aquanaut"
+		<< " contentScale=" << Options::getAquanautUiScale();
+
 	_screen = false;
 
 	// Create objects

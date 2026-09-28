@@ -3320,6 +3320,10 @@ std::list<BattleState*> BattlescapeGame::getStates()
  */
 void BattlescapeGame::autoEndBattle()
 {
+	if (_save->isTestEmptyHostileSandbox())
+	{
+		return;
+	}
 	if (_save->isPreview())
 	{
 		return;

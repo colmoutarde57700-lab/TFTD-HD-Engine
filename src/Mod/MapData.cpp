@@ -25,7 +25,7 @@ namespace OpenXcom
  * Creates a new Map Data Object.
  * @param dataset The dataset this object belongs to.
  */
-MapData::MapData(MapDataSet *dataset) : _dataset(dataset), _specialType(TILE), 
+MapData::MapData(MapDataSet *dataset, int datasetIndex) : _dataset(dataset), _datasetIndex(datasetIndex), _specialType(TILE), 
 				_isUfoDoor(false), _stopLOS(false), _isNoFloor(false), _isGravLift(false), _isDoor(false), _blockFire(false), _blockSmoke(false), _baseModule(false),
 				_yOffset(0), _TUWalk(0), _TUFly(0), _TUSlide(0), _terrainLevel(0), _footstepSound(0), _dieMCD(0), _altMCD(0), _objectType(O_FLOOR), _lightSource(0),
 				_armor(0), _flammable(0), _fuel(0), _explosive(0), _explosiveType(0), _bigWall(0), _miniMapIndex(0)
@@ -50,6 +50,15 @@ MapData::~MapData()
 MapDataSet *MapData::getDataset() const
 {
 	return _dataset;
+}
+
+/**
+ * Gets the stable logical MCD record index within the parent dataset.
+ * This identity is independent from the PCK sprite frame currently assigned.
+ */
+int MapData::getDatasetIndex() const
+{
+	return _datasetIndex;
 }
 
 /**

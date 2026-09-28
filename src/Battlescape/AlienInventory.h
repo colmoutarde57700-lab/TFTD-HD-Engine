@@ -55,10 +55,13 @@ public:
 	void setSelectedUnit(BattleUnit *unit);
 	/// Draws the inventory.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Draws the inventory grid.
 	void drawGrid();
 	/// Draws the inventory items.
 	void drawItems();
+	/// Builds the composite alien-inventory pixels for direct presentation.
+	SDL_Surface *getPresentationSurface() override;
 	/// Blits the inventory onto another surface.
 	void blit(SDL_Surface *surface) override;
 	/// Special handling for mouse clicks.

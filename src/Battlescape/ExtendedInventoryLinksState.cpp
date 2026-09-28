@@ -37,6 +37,13 @@ namespace OpenXcom
  */
 ExtendedInventoryLinksState::ExtendedInventoryLinksState(InventoryState* parent, SavedBattleGame* save, bool inBase, bool beforeMission) : _parent(parent), _save(save)
 {
+	// AQUANAUT_UI_FAMILY_V1-B: this screen is owned by Inventory and must
+	// stay in the same Aquanaut presentation space/content scale.
+	setUiFamily(UiFamily::Aquanaut);
+	setPresentationScale(Options::getAquanautUiScale());
+	Log(LOG_INFO) << "[AQUANAUT-UI FAMILY V1-B][ASSIGN] state=ExtendedInventoryLinksState family=Aquanaut"
+		<< " contentScale=" << Options::getAquanautUiScale();
+
 	_screen = false;
 
 	// Create objects

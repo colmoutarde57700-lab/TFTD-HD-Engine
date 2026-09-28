@@ -182,6 +182,7 @@ public:
 	void draw() override;
 	/// Blits the text list onto another surface.
 	void blit(SDL_Surface *surface) override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Thinks arrow buttons.
 	void think() override;
 	/// Handles arrow buttons.

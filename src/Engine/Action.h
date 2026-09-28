@@ -38,6 +38,8 @@ private:
 	double _surfaceScaleX, _surfaceScaleY;
 	int _presentationAnchorX, _presentationAnchorY;
 	double _presentationScaleX, _presentationScaleY;
+	bool _logicalMouseOverrideEnabled;
+	double _logicalMouseOverrideX, _logicalMouseOverrideY;
 	InteractiveSurface *_sender;
 public:
 	/// Creates an action with given event data.
@@ -52,6 +54,11 @@ public:
 	void setMouseAction(int mouseX, int mouseY, int surfaceX, int surfaceY, double surfaceScaleX = 1.0, double surfaceScaleY = 1.0);
 	/// Sets the presentation transform used to map displayed UI coordinates back to original logical coordinates.
 	void setPresentationTransform(int anchorX, int anchorY, double scaleX = 1.0, double scaleY = 1.0);
+	/// Overrides absolute mouse coordinates with an explicit presentation-space logical position.
+	/// Used by fixed UI spaces whose physical transform is intentionally independent from Screen/World scale.
+	void setLogicalMouseOverride(double logicalX, double logicalY);
+	/// Clears an explicit presentation-space logical mouse override.
+	void clearLogicalMouseOverride();
 	/// Gets if the action is a mouse action.
 	bool isMouseAction() const;
 	/// Gets the top black band height.

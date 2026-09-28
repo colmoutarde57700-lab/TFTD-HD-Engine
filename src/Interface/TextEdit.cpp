@@ -17,6 +17,7 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "TextEdit.h"
+#include "../Engine/HdCanvas.h"
 #include <cmath>
 #include "../Engine/Action.h"
 #include "../Engine/Font.h"
@@ -303,6 +304,19 @@ void TextEdit::blink()
 void TextEdit::draw()
 {
 	Surface::draw();
+	drawContents(nullptr, nullptr);
+}
+
+void TextEdit::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas contents(getWidth(), getHeight());
+	drawContents(&contents, &images);
+	composeHdLayer(canvas, contents);
+}
+
+void TextEdit::drawContents(HdCanvas *canvas, HdImageCache *images)
+{
 	UString newValue = _value;
 	if (Options::keyboardMode == KEYBOARD_OFF)
 	{
@@ -312,7 +326,6 @@ void TextEdit::draw()
 		}
 	}
 	_text->setText(Unicode::convUtf32ToUtf8(newValue));
-	clear();
 
 	// TODO: this whole thing is old and ugly, rework later
 	if (_enter && _drawBackground)
@@ -322,10 +335,12 @@ void TextEdit::draw()
 		square.y = 0;
 		square.w = getWidth();
 		square.h = getHeight();
-		drawRect(&square, getColor());
+		if (canvas) canvas->rectangle({0, 0, double(square.w), double(square.h)}, getHdColor(getColor()));
+		else drawRect(&square, getColor());
 	}
 
-	_text->blit(this->getSurface());
+	if (canvas) _text->composeHd(*canvas, *images);
+	else _text->blit(this->getSurface());
 	if (Options::keyboardMode == KEYBOARD_ON)
 	{
 		if (_isFocused && _blink)
@@ -362,7 +377,8 @@ void TextEdit::draw()
 				break;
 			}
 			_caret->setY(y);
-			_caret->blit(this->getSurface());
+			if (canvas) _caret->composeHd(*canvas, *images);
+			else _caret->blit(this->getSurface());
 		}
 	}
 }

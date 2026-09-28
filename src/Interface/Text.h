@@ -55,6 +55,8 @@ private:
 	void processText();
 	/// Gets the X position of a text line.
 	int getLineX(int line) const;
+	/// Shared text layout; HD emits glyph commands, historical mode uses its raster.
+	void drawTextContents(HdCanvas *canvas, int paletteInvertMid = -1);
 public:
 	/// Creates a new text with the specified size and position.
 	Text(int width, int height, int x = 0, int y = 0);
@@ -102,6 +104,8 @@ public:
 	int getTextHeight(int line = -1) const;
 	/// Draws the text.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
+	void composeHdWithPalette(HdCanvas &canvas, HdImageCache &images, int paletteInvertMid);
 	/// Sets the text's scrollable setting.
 	void setScrollable(bool scroll);
 	/// Special handling for mouse presses.

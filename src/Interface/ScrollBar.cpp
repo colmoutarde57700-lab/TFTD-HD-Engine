@@ -21,6 +21,7 @@
 #include "../Engine/Action.h"
 #include "TextList.h"
 #include "../Engine/Palette.h"
+#include "../Engine/HdUiImage.h"
 
 namespace OpenXcom
 {
@@ -240,6 +241,37 @@ void ScrollBar::mouseRelease(Action *action, State *state)
 /**
  * Updates the thumb according to the current list position.
  */
+void ScrollBar::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible() || !_list || !_list->getRowsDoNotUse() || getHeight() <= 0) return;
+	const double scale = double(getHeight()) / _list->getRowsDoNotUse();
+	_thumbRect.x = 0;
+	_thumbRect.y = static_cast<Sint16>(std::floor(_list->getScroll() * scale));
+	_thumbRect.w = getWidth();
+	_thumbRect.h = static_cast<Uint16>(std::ceil(_list->getVisibleRows() * scale));
+	HdCanvas content(getWidth(), getHeight());
+	if (_bg && getWidth() > 2)
+	{
+		const auto mapping = _list->getComboBox() ? hdUiOffsetPalette(1, Palette::backPos) : hdUiOffsetBlockPalette(-5);
+		_bg->composeHdBackdrop(content, images,
+			{double(getX() + 1 - _bg->getX()), double(getY() - _bg->getY()), double(getWidth() - 2), double(getHeight())},
+			{1, 0, double(getWidth() - 2), double(getHeight())}, mapping);
+	}
+	if (_thumbRect.h)
+	{
+		const bool hollow = _thumbRect.h > 6;
+		const std::string name = hollow ? "ScrollThumb" : "ScrollThumbShort" + std::to_string(_thumbRect.h);
+		const auto definition = hdUiWidgetDefinition(name, 13, hollow ? 12 : _thumbRect.h);
+		auto palette = std::make_shared<std::array<HdRgba, 256>>();
+		for (size_t i = 0; i < palette->size(); ++i) (*palette)[i] = getHdColor(static_cast<Uint8>(_color + i));
+		(*palette)[0].a = 0;
+		const double edge = hollow ? 3 : 0;
+		hdAppendUiSlicedImage(content, images, definition,
+			{0, double(_thumbRect.y), double(_thumbRect.w), double(_thumbRect.h)}, {3, edge, 3, edge}, palette);
+	}
+	composeHdLayer(canvas, content);
+}
+
 void ScrollBar::draw()
 {
 	Surface::draw();

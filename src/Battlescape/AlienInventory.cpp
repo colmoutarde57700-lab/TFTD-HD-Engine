@@ -25,11 +25,15 @@
 #include "../Engine/Screen.h"
 #include "../Engine/SurfaceSet.h"
 #include "../Engine/Timer.h"
+#include "../Engine/HdUiImage.h"
+#include "../Engine/Exception.h"
 #include "../Interface/Text.h"
 #include "../Mod/Mod.h"
 #include "../Mod/RuleInventory.h"
 #include "../Mod/RuleInterface.h"
 #include "../Savegame/BattleUnit.h"
+#include "../Savegame/BattleItem.h"
+#include "../Mod/RuleItem.h"
 #include "../Savegame/SavedGame.h"
 #include "../Ufopaedia/Ufopaedia.h"
 
@@ -107,6 +111,53 @@ void AlienInventory::draw()
 {
 	drawGrid();
 	drawItems();
+}
+
+void AlienInventory::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas content(getWidth(), getHeight());
+	HdCanvas grid(getWidth(), getHeight());
+	auto *mod = _game->getMod();
+	const auto color = getHdColor(mod->getInterface("inventory")->getElement("grid")->color);
+	const auto handX = [&](const RuleInventory *slot)
+	{
+		int x = slot->getX() + mod->getAlienInventoryOffsetX();
+		if (slot->isRightHand()) x -= _dynamicOffset;
+		else if (slot->isLeftHand()) x += _dynamicOffset;
+		return x;
+	};
+	for (const auto &entry : *mod->getInventories())
+	{
+		const auto *slot = entry.second;
+		if (slot->getType() != INV_HAND) continue;
+		const HdRect box{double(handX(slot)), double(slot->getY()),
+			double(RuleInventory::HAND_W * RuleInventory::SLOT_W),
+			double(RuleInventory::HAND_H * RuleInventory::SLOT_H)};
+		grid.rectangle(box, color);
+		grid.sourceRectangle({box.x + 1, box.y + 1, box.w - 2, box.h - 2}, {0, 0, 0, 0});
+	}
+	content.composite(grid);
+	if (_selUnit)
+	{
+		auto palette = std::make_shared<std::array<HdRgba, 256>>();
+		for (size_t i = 0; i < palette->size(); ++i) (*palette)[i] = getHdColor(static_cast<Uint8>(i));
+		const auto *save = _game->getSavedGame()->getSavedBattle();
+		for (const auto *item : *_selUnit->getInventory())
+		{
+			const auto *slot = item->getSlot();
+			if (!slot || slot->getType() != INV_HAND) continue;
+			const int frame = item->getInventorySpriteFrame(save, _animFrame);
+			if (frame == -1) continue;
+			if (item->hasInventoryPixelProgram())
+				throw Exception("[HD INVENTORY ERROR] Pixel program still requires an HD material adapter: " + item->getRules()->getType());
+			const double x = handX(slot) + item->getRules()->getHandSpriteOffX();
+			const double y = slot->getY() + item->getRules()->getHandSpriteOffY();
+			hdAppendUiImage(content, images, hdUiFrameDefinition("BIGOBS.PCK", frame, 32, 48),
+				{0, 0, 32, 48}, {x, y, 32, 48}, palette);
+		}
+	}
+	composeHdLayer(canvas, content);
 }
 
 /**
@@ -208,14 +259,32 @@ RuleInventory *AlienInventory::getSlotInPosition(int *x, int *y) const
 }
 
 /**
+ * Builds the exact composite pixels of the alien inventory for presentation.
+ *
+ * Like Inventory, AlienInventory owns child grid/item surfaces that were only
+ * folded into the parent during blit().  Direct UiFamily presentation asks for
+ * presentation pixels instead, so compose the same layers here.
+ */
+SDL_Surface *AlienInventory::getPresentationSurface()
+{
+	if (_redraw)
+	{
+		draw();
+		_redraw = false;
+	}
+	clear();
+	_grid->blitNShade(this, 0, 0);
+	_items->blitNShade(this, 0, 0);
+	return _surface.get();
+}
+
+/**
  * Blits the inventory elements.
  * @param surface Pointer to surface to blit onto.
  */
 void AlienInventory::blit(SDL_Surface *surface)
 {
-	clear();
-	_grid->blitNShade(this, 0, 0);
-	_items->blitNShade(this, 0, 0);
+	getPresentationSurface();
 	Surface::blit(surface);
 }
 

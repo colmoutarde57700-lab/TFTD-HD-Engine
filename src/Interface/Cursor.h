@@ -47,6 +47,7 @@ public:
 	Uint8 getColor() const;
 	/// Draws the cursor.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 };
 
 }

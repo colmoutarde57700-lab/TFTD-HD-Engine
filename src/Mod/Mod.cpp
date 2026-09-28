@@ -895,7 +895,9 @@ void Mod::lazyLoadSurface(const std::string &name)
 Surface *Mod::getSurface(const std::string &name, bool error)
 {
 	lazyLoadSurface(name);
-	return getRule(name, "Sprite", _surfaces, error);
+	Surface *surface = getRule(name, "Sprite", _surfaces, error);
+	if (surface) surface->setHdResourceId(name, _manaEnabled);
+	return surface;
 }
 
 /**

@@ -39,6 +39,13 @@ namespace OpenXcom
  */
 InventoryPersonalState::InventoryPersonalState(Soldier* soldier)
 {
+	// AQUANAUT_UI_FAMILY_V1-B: this screen is owned by Inventory and must
+	// stay in the same Aquanaut presentation space/content scale.
+	setUiFamily(UiFamily::Aquanaut);
+	setPresentationScale(Options::getAquanautUiScale());
+	Log(LOG_INFO) << "[AQUANAUT-UI FAMILY V1-B][ASSIGN] state=InventoryPersonalState family=Aquanaut"
+		<< " contentScale=" << Options::getAquanautUiScale();
+
 	_screen = false;
 
 	// Create objects

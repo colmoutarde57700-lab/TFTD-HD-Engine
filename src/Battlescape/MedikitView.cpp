@@ -25,6 +25,9 @@
 #include "../Engine/Language.h"
 #include "../Savegame/BattleUnit.h"
 #include "../Interface/Text.h"
+#include "../Engine/HdUiImage.h"
+#include "../Engine/Options.h"
+#include "../Engine/Screen.h"
 
 namespace OpenXcom
 {
@@ -86,11 +89,51 @@ void MedikitView::draw()
  * @param action Pointer to an action.
  * @param state State that the action handlers belong to.
  */
+void MedikitView::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	int green = 0, red = 3;
+	if (_game->getMod()->getInterface("medikit", false))
+		if (const auto *body = _game->getMod()->getInterface("medikit")->getElementOptional("body"))
+		{
+			green = body->color;
+			red = body->color2;
+		}
+	HdCanvas content(getWidth(), getHeight());
+	for (int part = 0; part < BODYPART_MAX; ++part)
+	{
+		const int base = _unit->getFatalWound(static_cast<UnitBodyPart>(part)) ? red : green;
+		auto palette = std::make_shared<std::array<HdRgba, 256>>();
+		for (size_t i = 0; i < palette->size(); ++i)
+			(*palette)[i] = getHdColor(static_cast<Uint8>(i == 0 || base == 0 ? i : ((base - 1) * 16) | (i & 15)));
+		hdAppendUiImage(content, images, hdUiFrameDefinition("MEDIBITS.DAT", part, 52, 58),
+			{0, 0, 52, 58}, {0, 0, 52, 58}, palette);
+	}
+	if (_selectedPart >= 0 && _selectedPart < BODYPART_MAX)
+	{
+		_partTxt->setText(_game->getLanguage()->getString(PARTS_STRING[_selectedPart]));
+		_woundTxt->setText(std::to_string(_unit->getFatalWound(static_cast<UnitBodyPart>(_selectedPart))));
+	}
+	composeHdLayer(canvas, content);
+}
+
 void MedikitView::mouseClick (Action *action, State *)
 {
-	SurfaceSet *set = _game->getMod()->getSurfaceSet("MEDIBITS.DAT");
 	int x = action->getRelativeXMouse() / action->getXScale();
 	int y = action->getRelativeYMouse() / action->getYScale();
+	if (Options::hdGraphics)
+	{
+		for (int part = 0; part < BODYPART_MAX; ++part)
+			if (hdUiImageHitTest(_game->getScreen()->getHdCanvasImages(),
+				hdUiFrameDefinition("MEDIBITS.DAT", part, 52, 58), {double(x), double(y)}))
+			{
+				_selectedPart = part;
+				_redraw = true;
+				break;
+			}
+		return;
+	}
+	SurfaceSet *set = _game->getMod()->getSurfaceSet("MEDIBITS.DAT");
 	for (unsigned int i = 0; i < set->getTotalFrames(); i++)
 	{
 		Surface * surface = set->getFrame (i);

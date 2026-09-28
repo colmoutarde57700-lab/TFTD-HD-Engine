@@ -1,3 +1,5 @@
+#include "../Engine/HdUiPicture.h"
+#include "../Engine/Options.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -49,19 +51,29 @@ namespace OpenXcom
  */
 UnitInfoState::UnitInfoState(BattleUnit *unit, BattlescapeState *parent, bool fromInventory, bool mindProbe) : _unit(unit), _parent(parent), _fromInventory(fromInventory), _mindProbe(mindProbe)
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Options::baseXResolution = Screen::ORIGINAL_WIDTH;
-		Options::baseYResolution = Screen::ORIGINAL_HEIGHT;
-		_game->getScreen()->resetDisplay(false);
-	}
 	_battleGame = _game->getSavedGame()->getSavedBattle();
 
-	// HD UI: this full-screen unit statistics view is opened from Battlescape
-	// without setInterface(), so it would otherwise keep State's default x1
-	// presentation scale.  Match the parent UI family explicitly.  When reached
-	// from Inventory, use the independent Aquanaut/inventory scale instead.
-	setPresentationScale(_fromInventory ? Options::getAquanautUiScale() : Options::getBattleUiScale());
+	// AQUANAUT_UI_FAMILY_V1: only the Inventory-origin UnitInfo enters the
+	// Aquanaut family in this first tranche. The Battlescape/mind-probe path
+	// retains its historical maximizeInfoScreens behaviour until the tactical
+	// UnitInfo footprint is audited separately, avoiding a silent size change.
+	if (_fromInventory)
+	{
+		setUiFamily(UiFamily::Aquanaut);
+		setPresentationScale(Options::getAquanautUiScale());
+		Log(LOG_INFO) << "[AQUANAUT-UI FAMILY V1][UNIT-INFO] origin=Aquanaut family=Aquanaut"
+			<< " contentScale=" << Options::getAquanautUiScale();
+	}
+	else
+	{
+		if (Options::maximizeInfoScreens)
+		{
+			Options::baseXResolution = Screen::ORIGINAL_WIDTH;
+			Options::baseYResolution = Screen::ORIGINAL_HEIGHT;
+			_game->getScreen()->resetDisplay(false);
+		}
+		setPresentationScale(Options::getBattleUiScale());
+	}
 
 	// Create objects
 	_bg = new Surface(320, 200, 0, 0);
@@ -279,6 +291,7 @@ UnitInfoState::UnitInfoState(BattleUnit *unit, BattlescapeState *parent, bool fr
 
 	// Set up objects
 	_game->getMod()->getSurface("UNIBORD.PCK")->blitNShade(_bg, 0, 0);
+	if (Options::hdGraphics) _bg->setHdPicture(_game->getMod()->getSurface("UNIBORD.PCK")->getHdPicture());
 
 	_exit->onMouseClick((ActionHandler)&UnitInfoState::exitClick);
 	_exit->onKeyboardPress((ActionHandler)&UnitInfoState::exitClick, Options::keyCancel);
@@ -779,6 +792,7 @@ void UnitInfoState::exitClick(Action *)
 		Screen::updateScale(Options::battlescapeScale, Options::baseXBattlescape, Options::baseYBattlescape, true);
 		_game->getScreen()->resetDisplay(false);
 	}
+	// Inventory-origin UnitInfo never changed World/Physical presentation.
 	_game->popState();
 }
 

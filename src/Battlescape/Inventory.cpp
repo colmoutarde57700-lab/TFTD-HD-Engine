@@ -261,6 +261,7 @@ void Inventory::drawGrid()
  */
 void Inventory::drawGridLabels(bool showTuCost)
 {
+	_hdShowTuCost = showTuCost;
 	_gridLabels->clear();
 
 	Text text = Text(90, 9, 0, 0);
@@ -635,17 +636,39 @@ void Inventory::think()
 }
 
 /**
- * Blits the inventory elements.
- * @param surface Pointer to surface to blit onto.
+ * Builds the exact composite pixels of the inventory for presentation.
+ *
+ * INVENTORY_PRESENTATION_COMPOSITE_V1: Inventory historically performs a
+ * second composition stage inside blit(): grid, items, labels, selection and
+ * warning are child surfaces that are not present in Inventory::_surface until
+ * blit() is called.  UiFamily direct physical presentation deliberately bypasses
+ * blit(), so expose that same composition through getPresentationSurface().
+ * This preserves the legacy Inventory semantics without routing the result back
+ * through World scaling.
  */
-void Inventory::blit(SDL_Surface *surface)
+SDL_Surface *Inventory::getPresentationSurface()
 {
+	if (_redraw)
+	{
+		draw();
+		_redraw = false;
+	}
 	clear();
 	_grid->blitNShade(this, 0, 0);
 	_items->blitNShade(this, 0, 0);
 	_gridLabels->blitNShade(this, 0, 0);
 	_selection->blitNShade(this, _selection->getX(), _selection->getY());
 	_warning->blit(this->getSurface());
+	return _surface.get();
+}
+
+/**
+ * Blits the inventory elements.
+ * @param surface Pointer to surface to blit onto.
+ */
+void Inventory::blit(SDL_Surface *surface)
+{
+	getPresentationSurface();
 	Surface::blit(surface);
 }
 

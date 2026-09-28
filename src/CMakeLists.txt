@@ -8,6 +8,7 @@ set ( basescape_src
   Basescape/BaseInfoState.cpp
   Basescape/BasescapeState.cpp
   Basescape/BaseView.cpp
+  Basescape/BaseViewHd.cpp
   Basescape/BuildFacilitiesState.cpp
   Basescape/CraftArmorState.cpp
   Basescape/CraftEquipmentLoadState.cpp
@@ -79,6 +80,8 @@ set ( battlescape_src
   Battlescape/BattlescapeGenerator.cpp
   Battlescape/BattlescapeMessage.cpp
   Battlescape/BattlescapeState.cpp
+  Battlescape/HdFacadeProfileRegistry.cpp
+  Battlescape/HdSurfaceMaterialRegistry.cpp
   Battlescape/BattleState.cpp
   Battlescape/BriefingLightState.cpp
   Battlescape/BriefingState.cpp
@@ -96,17 +99,31 @@ set ( battlescape_src
   Battlescape/InfoboxOKState.cpp
   Battlescape/InfoboxState.cpp
   Battlescape/Inventory.cpp
+  Battlescape/InventoryHd.cpp
   Battlescape/InventoryLoadState.cpp
   Battlescape/InventoryPersonalState.cpp
   Battlescape/InventorySaveState.cpp
   Battlescape/InventoryState.cpp
   Battlescape/ItemSprite.cpp
+  Battlescape/BedrockRender.cpp
+  Battlescape/RealHdVisibilitySolver.cpp
+  Battlescape/RealHdOcclusion.cpp
+  Battlescape/RealHdPhysicalGeometry.cpp
+  Battlescape/RealHdMapSceneBuilder.cpp
+  Battlescape/RealHdFovAuthority.cpp
+  Battlescape/RealHdWorldPresentation.cpp
+  Battlescape/RealHdWorldCoverage.cpp
+  Battlescape/RemasterWorldState.cpp
+  Battlescape/OxceWorldAdapter.cpp
   Battlescape/Map.cpp
+  Battlescape/RealHdLightingAuthority.cpp
+  Battlescape/RealHdPerceptionAuthority.cpp
   Battlescape/MedikitState.cpp
   Battlescape/MedikitView.cpp
   Battlescape/MeleeAttackBState.cpp
   Battlescape/MiniMapState.cpp
   Battlescape/MiniMapView.cpp
+  Battlescape/MiniMapViewHd.cpp
   Battlescape/NextTurnState.cpp
   Battlescape/NoExperienceState.cpp
   Battlescape/Particle.cpp
@@ -146,6 +163,9 @@ set ( engine_src
   Engine/FlcPlayer.cpp
   Engine/Font.cpp
   Engine/HdImage.cpp
+  Engine/HdCanvasRenderer.cpp
+  Engine/HdFont.cpp
+  Engine/HdUiImage.cpp
   Engine/HdGpuBackend.cpp
   Engine/Game.cpp
   Engine/GMCat.cpp
@@ -200,6 +220,8 @@ set ( geoscape_src
   Geoscape/DogfightErrorState.cpp
   Geoscape/DogfightExperienceState.cpp
   Geoscape/DogfightState.cpp
+  Geoscape/DogfightHd.cpp
+  Geoscape/HdCraftIndicator.cpp
   Geoscape/ExtendedGeoscapeLinksState.cpp
   Geoscape/FundingState.cpp
   Geoscape/GeoscapeCraftState.cpp
@@ -611,6 +633,8 @@ if (( APPLE AND CREATE_BUNDLE ) OR CPACK_GENERATOR STREQUAL "7Z" )
 endif ()
 
 add_executable ( openxcom  ${application_type} ${openxcom_src} ${openxcom_icon} )
+# Resource filenames are relative to the source root, independently of the build location.
+target_include_directories(openxcom PRIVATE "${PROJECT_SOURCE_DIR}")
 
 if ( EMBED_ASSETS )
   add_dependencies(openxcom zips)
@@ -639,7 +663,7 @@ endif ()
 
 if (WIN32)
   set(CMAKE_EXE_LINKER_FLAGS -Wl,--export-all-symbols)
-  set(WIN32_LIBS imagehlp dbghelp d3d11 dxgi d3dcompiler)
+  set(WIN32_LIBS imagehlp dbghelp d3d11 dxgi d3dcompiler d2d1 dwrite)
 endif(WIN32)
 
 target_link_libraries ( openxcom ${system_libs} ${PKG_DEPS_LDFLAGS} ${EXTRA_XCOM_LIBS} ${WIN32_LIBS} )

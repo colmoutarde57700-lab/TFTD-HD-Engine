@@ -1,3 +1,5 @@
+#include "../Engine/HdCausticSettings.h"
+#include "../Engine/HdRenderTrace.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -19,8 +21,10 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 #include "../fmath.h"
 #include <SDL_gfxPrimitives.h>
+#include <SDL_rotozoom.h>
 #include "Map.h"
 #include "Camera.h"
 #include "BattlescapeState.h"
@@ -52,13 +56,16 @@
 #include "../Engine/Surface.h"
 #include "../Engine/SurfaceSet.h"
 #include "../Engine/Screen.h"
+#include "../Engine/PresentationSpaces.h"
 #include "../Engine/HdRenderSpace.h"
+#include "../Engine/HdGpuBackend.h"
 #include "../Engine/Sound.h"
 #include "../Engine/Action.h"
 #include "../Engine/Script.h"
 #include "../Engine/Logger.h"
 #include "../Engine/Timer.h"
 #include "../Engine/HdPerf.h"
+#include "../Engine/HdUiPicture.h"
 #include "../Engine/CrossPlatform.h"
 #include "../Interface/Cursor.h"
 #include "../Interface/Text.h"
@@ -326,6 +333,32 @@ BattlescapeState::BattlescapeState() :
 		_numLayers->setVisible(false);
 	}
 
+	if (Options::hdGraphics)
+	{
+		try
+		{
+			HdUiPicture panel(iconsWidth, iconsHeight);
+			panel.image(hdUiScreenDefinition("ICONS.PCK", icons->getWidth(), icons->getHeight()),
+				{0, double(200 - iconsHeight), double(iconsWidth), double(iconsHeight)}, panel.bounds());
+			if (Surface *reserve = _game->getMod()->getSurface("TFTDReserve", false))
+				panel.composite(reserve->getHdPicture(), {48, double(176 - (200 - iconsHeight)), 1, 1});
+			if (_game->getMod()->getInterface("battlescape")->getElement("icons")->TFTDMode)
+				panel.fill({46, 44, 1, 1}, 8);
+			if (Options::oxceLinks)
+				if (Surface *links = _game->getMod()->getSurface("oxceLinks", false))
+					panel.composite(links->getHdPicture(), {208, 0, 1, 1});
+			_icons->setHdPicture(panel);
+		}
+		catch (const std::exception &error)
+		{
+			// Optional HD bindings must not escape this constructor before the
+			// normal presentation boundary can choose HD overrides or native UI.
+			_icons->setHdNativeFallback(error.what());
+			hdTraceRoute("hud-binding", "ICONS.PCK", "HD_OVERRIDE_OR_LEGACY",
+				std::string("Cannot prepare generic HD panel; explicit HUD override remains first: ") + error.what());
+		}
+	}
+
 	add(_rank, "rank", "battlescape", _icons);
 	add(_rankTiny, "rank", "battlescape", _icons);
 	add(_btnUnitUp, "buttonUnitUp", "battlescape", _icons);
@@ -421,9 +454,167 @@ BattlescapeState::BattlescapeState() :
 	_btnShift->initSurfaces(_game->getMod()->getSurfaceSet("Touch")->getFrame(5));
 	_btnRMB->initSurfaces(_game->getMod()->getSurfaceSet("Touch")->getFrame(7));
 	_btnMMB->initSurfaces(_game->getMod()->getSurfaceSet("Touch")->getFrame(9));
+	if (Options::hdGraphics)
+	{
+		const auto bindFrame = [](BattlescapeButton *button, const std::string &family, int frame, bool pressed)
+		{
+			HdUiPicture picture(button->getWidth(), button->getHeight());
+			picture.image(hdUiFrameDefinition(family, frame, button->getWidth(), button->getHeight()),
+				picture.bounds(), picture.bounds());
+			if (pressed) button->setHdPressedPicture(picture);
+			else button->setHdPicture(picture);
+		};
+		bindFrame(_btnLaunch, "SPICONS.DAT", 0, false);
+		for (auto *button : {_btnPsi, _btnSpecial, _btnSkills}) bindFrame(button, "SPICONS.DAT", 1, false);
+		int frame = 0;
+		for (auto *button : {_btnCtrl, _btnAlt, _btnShift, _btnRMB, _btnMMB})
+		{
+			bindFrame(button, "Touch", frame++, false);
+			bindFrame(button, "Touch", frame++, true);
+		}
+	}
 
 	// HUD-only presentation scaling from the stable v0.5 branch.
 	updateUiScaleTransforms();
+	updateBattleUiViewportReservation();
+	updateBattleUiInputTransforms();
+
+	// PRESENTATION_SPACES_TRACE_V1: capture the CURRENT Battlescape split exactly
+	// as it exists before any future refactor. No transform is modified here.
+	{
+		Screen *traceScreen = _game->getScreen();
+		const PresentationContext &pc = traceScreen->getPresentationContext();
+		auto traceSurface = [&](const char *label, Surface *surface)
+		{
+			if (!surface) return;
+			const int ds = std::max(1, surface->getDisplayScale());
+			const int dx = surface->getDisplayX();
+			const int dy = surface->getDisplayY();
+			const int dw = surface->getWidth() * ds;
+			const int dh = surface->getHeight() * ds;
+			Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][BATTLE-SURFACE] " << label
+				<< " logical=" << surface->getX() << "," << surface->getY() << "," << surface->getWidth() << "x" << surface->getHeight()
+				<< " display=" << dx << "," << dy << "," << dw << "x" << dh
+				<< " displayScale=" << ds
+				<< " physical=" << pc.logicalToPhysicalX(dx) << "," << pc.logicalToPhysicalY(dy)
+				<< "->" << pc.logicalToPhysicalX(dx + dw) << "," << pc.logicalToPhysicalY(dy + dh);
+		};
+		Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][BATTLESCAPE] base=" << screenWidth << "x" << screenHeight
+			<< " icons=" << iconsWidth << "x" << iconsHeight
+			<< " visibleMapHeight=" << visibleMapHeight
+			<< " worldScaleOpt=" << Options::battlescapeScale
+			<< " uiScale=" << Options::getBattleUiScale()
+			<< " pcLogical=" << pc.logicalWidth() << "x" << pc.logicalHeight()
+			<< " pcPhysical=" << pc.physicalWidth() << "x" << pc.physicalHeight()
+			<< " pcScale=" << pc.scaleX() << "x" << pc.scaleY();
+		traceSurface("map", _map);
+		traceSurface("icons", _icons);
+		traceSurface("leftHand", _btnLeftHandItem);
+		traceSurface("rightHand", _btnRightHandItem);
+		traceSurface("debug", _txtDebug);
+		traceSurface("contact0", _btnVisibleUnit[0]);
+
+		// PRESENTATION_SPACES_CONTRACT_V1 (SHADOW ONLY): formalize separate
+		// World/UI/Physical transforms without changing a single render/input path.
+		// The tactical UI golden reference is the validated 640x360 layout whose
+		// 640x82 HUD exactly fills 2560x328 at the user's reference x4 setting.
+		const PresentationSpacesContract shadow = PresentationSpacesContract::shadow(pc, 640, 360);
+		const PresentationRect shadowHudLogical = {0, 360 - iconsHeight, 640, iconsHeight};
+		const PresentationRect shadowHudPhysical = shadow.ui.logicalToPhysical(shadowHudLogical);
+		const int legacyHudDX = _icons->getDisplayX();
+		const int legacyHudDY = _icons->getDisplayY();
+		const int legacyHudDW = _icons->getWidth() * std::max(1, _icons->getDisplayScale());
+		const int legacyHudDH = _icons->getHeight() * std::max(1, _icons->getDisplayScale());
+		const PresentationRect legacyHudPhysical = {
+			pc.logicalToPhysicalX(legacyHudDX),
+			pc.logicalToPhysicalY(legacyHudDY),
+			pc.logicalToPhysicalX(legacyHudDX + legacyHudDW) - pc.logicalToPhysicalX(legacyHudDX),
+			pc.logicalToPhysicalY(legacyHudDY + legacyHudDH) - pc.logicalToPhysicalY(legacyHudDY)
+		};
+		Log(LOG_INFO) << "[PRESENTATION-SPACES CONTRACT V1][SPACES] mode=shadow"
+			<< " worldLogical=" << shadow.world.logicalW << "x" << shadow.world.logicalH
+			<< " worldContent=" << shadow.world.physicalContent.x << "," << shadow.world.physicalContent.y << ","
+			<< shadow.world.physicalContent.w << "x" << shadow.world.physicalContent.h
+			<< " worldScale=" << shadow.world.scaleX << "x" << shadow.world.scaleY
+			<< " uiLogical=" << shadow.ui.logicalW << "x" << shadow.ui.logicalH
+			<< " uiContent=" << shadow.ui.physicalContent.x << "," << shadow.ui.physicalContent.y << ","
+			<< shadow.ui.physicalContent.w << "x" << shadow.ui.physicalContent.h
+			<< " uiScale=" << shadow.ui.scaleX << "x" << shadow.ui.scaleY;
+		Log(LOG_INFO) << "[PRESENTATION-SPACES CONTRACT V1][HUD-SHADOW] worldScaleOpt=" << Options::battlescapeScale
+			<< " legacyLogical=" << legacyHudDX << "," << legacyHudDY << "," << legacyHudDW << "x" << legacyHudDH
+			<< " legacyPhysical=" << legacyHudPhysical.x << "," << legacyHudPhysical.y << ","
+			<< legacyHudPhysical.w << "x" << legacyHudPhysical.h
+			<< " shadowUiLogical=" << shadowHudLogical.x << "," << shadowHudLogical.y << ","
+			<< shadowHudLogical.w << "x" << shadowHudLogical.h
+			<< " shadowPhysical=" << shadowHudPhysical.x << "," << shadowHudPhysical.y << ","
+			<< shadowHudPhysical.w << "x" << shadowHudPhysical.h
+			<< " deltaPhysical=" << (shadowHudPhysical.x - legacyHudPhysical.x) << ","
+			<< (shadowHudPhysical.y - legacyHudPhysical.y) << ","
+			<< (shadowHudPhysical.w - legacyHudPhysical.w) << ","
+			<< (shadowHudPhysical.h - legacyHudPhysical.h);
+
+		auto traceHudShadowSurface = [&](const char *label, Surface *surface)
+		{
+			if (!surface || !_icons) return;
+			const int ds = std::max(1, surface->getDisplayScale());
+			// Convert the current legacy position back into the canonical 640x360
+			// HUD design space by expressing it relative to the HUD panel origin.
+			PresentationRect uiRect = {
+				(surface->getDisplayX() - _icons->getDisplayX()) + shadowHudLogical.x,
+				(surface->getDisplayY() - _icons->getDisplayY()) + shadowHudLogical.y,
+				surface->getWidth() * ds,
+				surface->getHeight() * ds
+			};
+			const PresentationRect phys = shadow.ui.logicalToPhysical(uiRect);
+			Log(LOG_INFO) << "[PRESENTATION-SPACES CONTRACT V1][HUD-ELEMENT-SHADOW] " << label
+				<< " uiLogical=" << uiRect.x << "," << uiRect.y << "," << uiRect.w << "x" << uiRect.h
+				<< " physical=" << phys.x << "," << phys.y << "," << phys.w << "x" << phys.h;
+		};
+		traceHudShadowSurface("leftHand", _btnLeftHandItem);
+		traceHudShadowSurface("rightHand", _btnRightHandItem);
+
+		// Contact indicators are NOT children of the legacy HUD transform: they
+		// were explicitly anchored to screenWidth. Using their current absolute
+		// legacy X here would therefore re-import the world-scale coupling into
+		// the shadow UI contract (x1/x2/x3 exposed this immediately). Rebuild the
+		// canonical position from the battlescape UI rule instead.
+		const PresentationRect contact0UiRect = {
+			visibleUnitX,
+			shadowHudLogical.y + visibleUnitY,
+			15,
+			12
+		};
+		const PresentationRect contact0Phys = shadow.ui.logicalToPhysical(contact0UiRect);
+		Log(LOG_INFO) << "[PRESENTATION-SPACES CONTRACT V1 R2][HUD-ELEMENT-SHADOW] contact0"
+			<< " semanticAnchor=ui-right"
+			<< " uiLogical=" << contact0UiRect.x << "," << contact0UiRect.y << ","
+			<< contact0UiRect.w << "x" << contact0UiRect.h
+			<< " physical=" << contact0Phys.x << "," << contact0Phys.y << ","
+			<< contact0Phys.w << "x" << contact0Phys.h;
+
+		// The special-action buttons use screenWidth in the legacy constructor
+		// for the same reason. Record the canonical UI-space anchor explicitly.
+		const PresentationRect launchUiRect = {640 - 32, 0, 32, 24};
+		const PresentationRect launchPhys = shadow.ui.logicalToPhysical(launchUiRect);
+		Log(LOG_INFO) << "[PRESENTATION-SPACES CONTRACT V1 R2][HUD-ELEMENT-SHADOW] launch"
+			<< " semanticAnchor=ui-right"
+			<< " uiLogical=" << launchUiRect.x << "," << launchUiRect.y << ","
+			<< launchUiRect.w << "x" << launchUiRect.h
+			<< " physical=" << launchPhys.x << "," << launchPhys.y << ","
+			<< launchPhys.w << "x" << launchPhys.h;
+
+		size_t cutoverSurfaceCount = 0;
+		for (Surface *surface : _surfaces)
+		{
+			if (isBattleUiRootCutoverSurface(surface)) ++cutoverSurfaceCount;
+		}
+		Log(LOG_INFO) << "[BATTLE-UI INPUT CUTOVER V1][ROOT] visual=ui input=ui"
+			<< " enabled=" << (Options::getBattleUiScale() == 1 ? 1 : 0)
+			<< " surfaces=" << cutoverSurfaceCount
+			<< " uiLogical=640x360 uiScale=" << shadow.ui.scaleX << "x" << shadow.ui.scaleY
+			<< " hudPhysical=" << shadowHudPhysical.x << "," << shadowHudPhysical.y << ","
+			<< shadowHudPhysical.w << "x" << shadowHudPhysical.h;
+	}
 
 	// Set up objects
 	_map->init();
@@ -765,9 +956,138 @@ BattlescapeState::BattlescapeState() :
 
 	_battleGame = new BattlescapeGame(_save, this);
 
+	// MISSION_RESOURCE_PREWARM_V2: decode the mission working set before the
+	// first interactive Battlescape/Inventory presentation. This deliberately
+	// stays synchronous in V2 because FileMap ZIP/VFS readers are shared.
+	_map->prewarmHdMissionResources();
+	prewarmHdUiResources();
+
 	_barHealthColor = _barHealth->getColor();
 }
 
+
+bool BattlescapeState::isBattleUiRootCutoverSurface(Surface *surface) const
+{
+	if (!surface || surface == _map || surface == _txtDebug || !_icons) return false;
+	if (!(Options::hdGraphics && Options::getBattleUiScale() == 1)) return false;
+
+	auto metaIt = _hdSurfaceMeta.find(surface);
+	if (metaIt != _hdSurfaceMeta.end() && metaIt->second.category == "battlescape") return true;
+
+	for (int i = 0; i < CONTACT_MAX; ++i)
+	{
+		if (surface == _btnVisibleUnit[i] || surface == _numVisibleUnit[i]) return true;
+	}
+	return surface == _btnLaunch || surface == _btnPsi || surface == _btnSpecial || surface == _btnSkills;
+}
+
+bool BattlescapeState::getBattleUiCanonicalRect(Surface *surface, PresentationRect &rect) const
+{
+	if (!isBattleUiRootCutoverSurface(surface) || !_icons) return false;
+	const int hudY = 360 - _icons->getHeight();
+
+	auto metaIt = _hdSurfaceMeta.find(surface);
+	if (metaIt != _hdSurfaceMeta.end() && metaIt->second.category == "battlescape")
+	{
+		rect = {
+			(surface->getX() - _icons->getX()),
+			(surface->getY() - _icons->getY()) + hudY,
+			surface->getWidth(), surface->getHeight()
+		};
+		return true;
+	}
+
+	const Element *visible = _game->getMod()->getInterface("battlescape")->getElement("visibleUnits");
+	const int contactColumnStep = 17;
+	for (int i = 0; i < CONTACT_MAX; ++i)
+	{
+		const int group = i / VISIBLE_MAX;
+		const int row = i % VISIBLE_MAX;
+		const int buttonX = visible->x - group * contactColumnStep;
+		const int buttonY = hudY + visible->y - row * 13;
+		if (surface == _btnVisibleUnit[i])
+		{
+			rect = {buttonX, buttonY, 15, 12};
+			return true;
+		}
+		if (surface == _numVisibleUnit[i])
+		{
+			rect = {buttonX + 6 - (row == 9 ? 2 : 0), buttonY + 4, 15, 12};
+			return true;
+		}
+	}
+
+	if (surface == _btnLaunch)
+	{
+		rect = {608, 0, surface->getWidth(), surface->getHeight()};
+		return true;
+	}
+	if (surface == _btnPsi || surface == _btnSpecial || surface == _btnSkills)
+	{
+		rect = {608, 25, surface->getWidth(), surface->getHeight()};
+		return true;
+	}
+	return false;
+}
+
+void BattlescapeState::updateBattleUiViewportReservation()
+{
+	if (!_map || !_icons || !_game || !_game->getScreen()) return;
+	if (!(Options::hdGraphics && Options::getBattleUiScale() == 1))
+	{
+		_map->setHudVisibleMapHeightOverride(-1);
+		return;
+	}
+
+	const PresentationSpacesContract spaces = PresentationSpacesContract::shadow(
+		_game->getScreen()->getPresentationContext(), 640, 360);
+	const int hudTopPhysical = spaces.ui.logicalToPhysicalY(360 - _icons->getHeight());
+	const double worldTop = spaces.world.physicalToLogicalY(hudTopPhysical);
+	const int visible = std::max(1, std::min(_map->getHeight(), (int)std::ceil(worldTop)));
+	_map->setHudVisibleMapHeightOverride(visible);
+	Log(LOG_INFO) << "[BATTLE-UI ROOT CUTOVER V1 R2][VIEWPORT]"
+		<< " worldLogical=" << spaces.world.logicalW << "x" << spaces.world.logicalH
+		<< " worldScale=" << spaces.world.scaleX << "x" << spaces.world.scaleY
+		<< " hudTopPhysical=" << hudTopPhysical
+		<< " visibleWorldLogical=" << visible
+		<< " visiblePhysicalEnd=" << spaces.world.logicalToPhysicalY(visible);
+}
+
+void BattlescapeState::updateBattleUiInputTransforms()
+{
+	if (!_game || !_game->getScreen()) return;
+	const bool enabled = Options::hdGraphics && Options::getBattleUiScale() == 1;
+	const PresentationSpacesContract spaces = PresentationSpacesContract::shadow(
+		_game->getScreen()->getPresentationContext(), 640, 360);
+
+	size_t routed = 0;
+	for (Surface *surface : _surfaces)
+	{
+		InteractiveSurface *interactive = dynamic_cast<InteractiveSurface*>(surface);
+		if (!interactive) continue;
+		PresentationRect uiRect;
+		if (enabled && getBattleUiCanonicalRect(surface, uiRect))
+		{
+			interactive->setPresentationInputTransform(
+				uiRect.x, uiRect.y, uiRect.w, uiRect.h,
+				spaces.ui.physicalContent.x, spaces.ui.physicalContent.y,
+				spaces.ui.scaleX, spaces.ui.scaleY);
+			++routed;
+		}
+		else
+		{
+			interactive->clearPresentationInputTransform();
+		}
+	}
+
+	Log(LOG_INFO) << "[BATTLE-UI INPUT CUTOVER V1][CONFIG] enabled=" << (enabled ? 1 : 0)
+		<< " routed=" << routed
+		<< " uiLogical=640x360"
+		<< " uiContent=" << spaces.ui.physicalContent.x << "," << spaces.ui.physicalContent.y << ","
+		<< spaces.ui.physicalContent.w << "x" << spaces.ui.physicalContent.h
+		<< " uiScale=" << spaces.ui.scaleX << "x" << spaces.ui.scaleY
+		<< " mapInput=world";
+}
 
 /**
  * Applies presentation-only integer scaling to the Battlescape HUD.
@@ -918,6 +1238,19 @@ void BattlescapeState::init()
 		_btnReserveAimed->setGroup(&_reserve);
 		_btnReserveAuto->setGroup(&_reserve);
 	}
+	{
+		const Position traceOffset = _map->getCamera()->getMapOffset();
+		const PresentationContext &pc = _game->getScreen()->getPresentationContext();
+		Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][BATTLE-INIT] base="
+			<< Options::baseXResolution << "x" << Options::baseYResolution
+			<< " mapSurface=" << _map->getWidth() << "x" << _map->getHeight()
+			<< " cameraMap=" << _map->getCamera()->getMapSizeX() << "x" << _map->getCamera()->getMapSizeY()
+			<< " viewLevel=" << _map->getCamera()->getViewLevel()
+			<< " mapOffset=" << traceOffset.x << "," << traceOffset.y << "," << traceOffset.z
+			<< " worldScaleOpt=" << Options::battlescapeScale
+			<< " uiScale=" << Options::getBattleUiScale()
+			<< " pc=" << pc.logicalWidth() << "x" << pc.logicalHeight() << "->" << pc.physicalWidth() << "x" << pc.physicalHeight();
+	}
 	_txtTooltip->setText("");
 	_btnReserveKneel->toggle(_save->getKneelReserved());
 	_battleGame->setKneelReserved(_save->getKneelReserved());
@@ -958,60 +1291,37 @@ bool BattlescapeState::isHudEffectivelyHidden() const
 void BattlescapeState::blit()
 {
 	SDL_Surface *logical = _game->getScreen()->getSurface();
-	if (Options::hdGraphics && _txtDebug && _map)
+	if (_txtDebug)
 	{
+		// The historical OXCE Text is never the REAL HD statistics panel.
+		_txtDebug->setVisible(false);
+	}
+	if (!Options::hdGraphics || !Options::hdDebugOverlay) _hdDebugHasSample = false;
+	if (Options::hdGraphics && Options::hdDebugOverlay &&
+		(!_hdDebugHasSample || Uint32(SDL_GetTicks() - _hdDebugLastRefresh) >= 500))
+	{
+		_hdDebugLastRefresh = SDL_GetTicks();
+		_hdDebugHasSample = true;
 		const auto &perf = getHdPerfStats();
-		const auto &p = perf.last;
 		const auto &a = perf.avg;
 		std::ostringstream diag;
-		const int tacX = std::max(1, Options::baseXResolution / Screen::ORIGINAL_WIDTH);
-		const int tacY = std::max(1, Options::baseYResolution / Screen::ORIGINAL_HEIGHT);
-		diag << std::fixed << std::setprecision(2);
-		diag << "RC12 P10A ENV A/B TOGGLE  GPU=" << (Screen::useOpenGL() ? "LEGACY-GL" : Screen::hdGpuModeName()) << "  Tac=" << tacX << "x/" << tacY << "x"
-			 << "  Display=" << _game->getScreen()->getWidth() << "x" << _game->getScreen()->getHeight() << "\n";
-		diag << "LAST frame=" << p.renderUs/1000.0 << "  states=" << p.statesBlitUs/1000.0
-			 << "  scale=" << p.scaleUs/1000.0 << "  phys=" << p.physicalPassUs/1000.0 << "  gpu=" << p.gpuOverlayUs/1000.0 << "  flip=" << p.sdlFlipUs/1000.0 << " ms\n";
-		diag << "PACE last=" << p.frameIntervalUs/1000.0 << "  target=" << p.frameTargetUs/1000.0
-			 << "  err=" << p.framePacingErrorUs/1000.0 << "  EMA=" << a.frameIntervalUs/1000.0
-			 << "/" << a.framePacingErrorUs/1000.0 << " ms\n";
-		diag << "LAST mapL=" << p.mapLogicalBlitUs/1000.0 << "  hudL=" << p.hudLogicalBlitUs/1000.0
-			 << "  mapP=" << p.mapPhysicalUs/1000.0 << "  hudP=" << p.hudPhysicalBlitUs/1000.0 << " ms\n";
-		diag << "MAP seed=" << p.mapSeedUs/1000.0 << "  rgba=" << p.mapCompositeUs/1000.0
-			 << "  gpuSub=" << p.mapGpuSubmitUs/1000.0 << "  cacheBlit=" << p.mapCacheBlitUs/1000.0
-			 << "  draw=" << p.mapDrawUs/1000.0 << " ms\n";
-		diag << "MAP " << (p.mapCacheHit ? "HIT" : "MISS") << "  cmd=" << p.mapCommands
-			 << "  px=" << (p.mapPixelsTested/1000) << "k/" << (p.mapPixelsWritten/1000) << "k"
-			 << "  zoom L/P=" << p.logicalZoomSurfaces << "/" << p.physicalZoomSurfaces
-			 << "  gpuDraw=" << Screen::hdGpuMapDrawCalls()
-			 << " idx=" << Screen::hdGpuIndexedDrawCalls()
-			 << " env=" << Screen::hdGpuEnvironmentDrawCalls() << "\n";
-		diag << "EMA frame=" << a.renderUs/1000.0 << "  scale=" << a.scaleUs/1000.0
-			 << "  mapP=" << a.mapPhysicalUs/1000.0 << "  hudP=" << a.hudPhysicalBlitUs/1000.0
-			 << "  hit=" << a.mapCacheHitPct << "%  redraw=" << a.mapRedrawPct << "%\n";
-		diag << _map->getHdRedrawTrace();
-		diag << "RLOG x" << HdRenderSpace::Scale
-			 << " tile=" << HdRenderSpace::TileWidth << "x" << HdRenderSpace::TileHeight
-			 << " legacy=" << HdRenderSpace::LegacyTileWidth << "x" << HdRenderSpace::LegacyTileHeight
-				 << "->x" << HdRenderSpace::Scale << " NN  assets=x1/x4/x8/x16\n";
-		diag << "CTRL Xms=" << Options::battleXcomSpeed
-			 << "  Ams=" << Options::battleAlienSpeed
-			 << "  Fire=" << Options::battleFireSpeed
-			 << "  Scroll=" << Options::battleScrollSpeed
-			 << "  gameT=" << (_gameTimer ? _gameTimer->getInterval() : 0)
-			 << "  catch=" << (_gameTimer ? _gameTimer->getFrameSkipLimit() : Timer::maxFrameSkip)
-			 << "  globalFS=" << Timer::maxFrameSkip
-			 << "  slow=" << Timer::gameSlowSpeed
-			 << "  Xorig=" << Options::battleXcomSpeedOrig;
-		if (_save && _save->getSelectedUnit())
-		{
-			const BattleUnit *u = _save->getSelectedUnit();
-			diag << "  status=" << (int)u->getStatus() << "  phase=" << u->getWalkingPhase();
-		}
-		diag << "\n";
-		_txtDebug->setText(diag.str());
+		const double intervalMs = a.frameIntervalUs / 1000.0;
+		diag << std::fixed << std::setprecision(1);
+		diag << "REAL HD  " << (intervalMs > 0.0 ? 1000.0 / intervalMs : 0.0)
+			 << " FPS  |  " << intervalMs << " ms/image  |  retard "
+			 << a.framePacingErrorUs / 1000.0 << " ms\n";
+		diag << "CPU  logique " << a.loopThinkUs / 1000.0
+			 << " ms  |  carte " << (a.mapLogicalBlitUs + a.mapPhysicalUs) / 1000.0
+			 << " ms  |  interface " << a.hudPhysicalBlitUs / 1000.0 << " ms\n";
+		diag << "GPU  image " << HdGpuBackend::instance().lastTrueGpuFrameUs() / 1000.0
+			 << " ms  |  carte " << HdGpuBackend::instance().lastTrueGpuMapUs() / 1000.0
+			 << " ms  |  redessins " << a.mapRedrawPct << "%";
+		_hdGpuDebugText = diag.str();
 	}
 	const bool hudSuppressed = isHudEffectivelyHidden();
 	const bool physicalHd = Options::hdGraphics;
+	// BATTLE_UI_ROOT_CUTOVER_V1_R2: migrated HUD pixels are omitted from the
+	// World logical canvas and presented once through UI Space below.
 	if (_map) _map->setHudHidden(hudSuppressed);
 	uint64_t perfMapLogical = 0;
 	uint64_t perfHudLogical = 0;
@@ -1030,7 +1340,14 @@ void BattlescapeState::blit()
 		else
 		{
 			if (physicalHd)
-				surface->blit(logical);
+			{
+				// Cut-over surfaces must no longer be baked into the World logical
+				// canvas, otherwise the old zoomed HUD would survive underneath the
+				// new UI-space presentation at x1/x5/x6. They are drawn once in the
+				// physical pass below.
+				// HUD surfaces are composed once in the physical pass.
+				// Unsupported widgets use its documented native fallback.
+			}
 			else
 				blitSurfaceWithHdOverride(surface, logical);
 			perfHudLogical += hdPerfNowUs() - perfSurfaceStart;
@@ -1043,6 +1360,7 @@ void BattlescapeState::blit()
 void BattlescapeState::blitPhysical(SDL_Surface *destination, Screen *screen, bool /*redrawLegacy*/)
 {
 	if (!Options::hdGraphics || !destination || !screen) return;
+	screen->setHdTraceContext("Battlescape:HUD", true);
 	const bool hudSuppressed = isHudEffectivelyHidden();
 	if (_map)
 	{
@@ -1052,20 +1370,161 @@ void BattlescapeState::blitPhysical(SDL_Surface *destination, Screen *screen, bo
 	}
 
 	const uint64_t perfHudPhysicalStart = hdPerfNowUs();
+	const PresentationSpacesContract spaces = PresentationSpacesContract::shadow(
+		screen->getPresentationContext(), 640, 360);
+	auto uiPhysicalRect = [&](Surface *surface)
+	{
+		PresentationRect uiRect;
+		if (!getBattleUiCanonicalRect(surface, uiRect)) return PresentationRect{0,0,0,0};
+		return spaces.ui.logicalToPhysical(uiRect);
+	};
+
+	auto blitUiSurfaceAt = [&](Surface *surface, const PresentationRect &phys)
+	{
+		if (!surface || phys.w <= 0 || phys.h <= 0) return;
+
+		std::string path;
+		auto explicitIt = _hdExplicitSurfacePath.find(surface);
+		if (explicitIt != _hdExplicitSurfacePath.end() && _hdUiCache.usable(explicitIt->second))
+		{
+			path = explicitIt->second;
+		}
+		else
+		{
+			auto metaIt = _hdSurfaceMeta.find(surface);
+			if (metaIt != _hdSurfaceMeta.end())
+			{
+				path = "Resources/TFTD_HD/UI/" + metaIt->second.category + "/" + metaIt->second.id + ".png";
+			}
+		}
+
+		HdGpuBackend &gpu = HdGpuBackend::instance();
+		if (!path.empty() && _hdUiCache.usable(path))
+		{
+			HdImage *image = &_hdUiCache.require(path);
+			if (image)
+			{
+				if (gpu.frameActive())
+				{
+					HdGpuPresentationSprite sprite;
+					sprite.assetKey = path.c_str();
+					sprite.rgba = image->rgba.data();
+					sprite.imageWidth = image->width;
+					sprite.imageHeight = image->height;
+					sprite.destX = phys.x;
+					sprite.destY = phys.y;
+					sprite.destW = phys.w;
+					sprite.destH = phys.h;
+					sprite.opacity = surface->getDisplayAlpha();
+					if (gpu.drawPresentationSprite(sprite)) return;
+				}
+				HdImageCache::blit(destination, *image, phys.x, phys.y, phys.w, phys.h,
+					surface->getDisplayAlpha(), 0, nullptr, false);
+				return;
+			}
+		}
+
+		if (screen->tryBlitHdSurfaceAt(surface, destination, phys.x, phys.y, phys.w, phys.h)) return;
+		// STRICT REAL HD: no native widget, GPU Legacy upload or zoom fallback.
+		hdTraceRoute("pixel-firewall", "Battlescape:HUD", "REAL_HD_MISSING",
+			"Unmigrated HUD surface suppressed", true);
+		return;
+	};
+
 	// Physical map composition necessarily happens after the scaler, therefore
 	// it may cover logical HUD/window pixels that were already present. Restore
-	// every non-map surface in original z-order. HD assets are sampled directly;
-	// dynamic text, bars and buttons are redrawn from their Legacy surfaces.
+	// every non-map surface in original z-order. BATTLE_UI_ROOT_CUTOVER_V1_R2 moves
+	// the HUD root plus contact stacks and special edge buttons to UI Space.
+	// Input geometry remains unchanged; the diagnostic panel is drawn by D3D11.
 	for (auto *surface : _surfaces)
 	{
-		if (!surface || surface == _map || !surface->isDisplayVisible()) continue;
+		if (!surface || surface == _map || surface == _txtDebug || !surface->isDisplayVisible()) continue;
 		if (hudSuppressed) continue;
+
+		if (isBattleUiRootCutoverSurface(surface))
+		{
+			const PresentationRect phys = uiPhysicalRect(surface);
+			blitUiSurfaceAt(surface, phys);
+			continue;
+		}
+
 		if (!blitSurfaceWithHdOverridePhysical(surface, destination, screen))
 		{
 			screen->blitSurfacePhysical(surface, false, destination);
 		}
 	}
 	getHdPerfStats().current.hudPhysicalBlitUs = hdPerfNowUs() - perfHudPhysicalStart;
+	if (Options::hdGraphics && (Options::hdDebugOverlay || _hdTunePage >= 0))
+	{
+		std::ostringstream overlay;
+		if (Options::hdDebugOverlay) overlay << _hdGpuDebugText;
+		if (_hdTunePage >= 0 && _hdTunePage != 3)
+		{
+			if (Options::hdDebugOverlay) overlay << "\n";
+			overlay << "REAL HD  " << (_hdTunePage == 0 ? "MATERIAUX" : _hdTunePage == 1 ? "LUMIERE" : "FOV")
+				<< "  |  haut/bas: choisir  gauche/droite: regler  Maj: x10  Echap: sauver\n";
+			auto row = [&](int index, const char *label, int value)
+			{
+				overlay << (_hdTuneRow == index ? "> " : "  ") << label << "  " << value << "\n";
+			};
+			auto toggle = [&](int index, const char *label, bool value)
+			{
+				overlay << (_hdTuneRow == index ? "> " : "  ") << label << "  " << (value ? "ON" : "OFF") << "\n";
+			};
+			if (_hdTunePage == 0)
+			{
+				toggle(0, "LUT", Options::hdEnvironmentGrade);
+				toggle(1, "Luminance profondeur", Options::hdDepthLuminance);
+				row(2, "LUT sol /1000", Options::hdBedrockLutTopPermille);
+				row(3, "LUT vertical /1000", Options::hdBedrockLutVerticalPermille);
+				row(4, "LUT couvert /1000", Options::hdBedrockLutCoveredPermille);
+				row(5, "Luminance D1 /1000", Options::hdBedrockLumaD1Permille);
+				row(6, "Luminance D3 /1000", Options::hdBedrockLumaD3Permille);
+			}
+			else if (_hdTunePage == 1)
+			{
+				toggle(0, "Lumieres locales", Options::hdLocalLightsEnabled);
+				row(1, "Intensite locales /1000", Options::hdLocalLightIntensityPermille);
+				row(2, "Rayon locales /1000", Options::hdLocalLightRadiusPermille);
+				toggle(3, "Lumiere surface", Options::hdSurfaceSunlightEnabled);
+				row(4, "Intensite soleil /1000", Options::hdSunlightIntensityPermille);
+				row(5, "Ambiante /1000", Options::hdAmbientLightPermille);
+				row(6, "Ombre /1000", Options::hdShadowStrengthPermille);
+			}
+			else
+			{
+				overlay << "  FOV REAL HD: ON (fixe)\n";
+				row(0, "Bord du brouillard /1000", Options::hdFogEdgeSoftnessPermille);
+				row(1, "Angle standard /1000 deg", Options::hdFovBaseHalfAngleMilliDeg);
+				row(2, "Angle plastique /1000 deg", Options::hdFovPlasticAquaHalfAngleMilliDeg);
+				row(3, "Angle ionique /1000 deg", Options::hdFovIonHalfAngleMilliDeg);
+				row(4, "Angle magnetique /1000 deg", Options::hdFovMagneticIonHalfAngleMilliDeg);
+			}
+		}
+
+        if(_hdTunePage==3){
+            auto &settings=HdCausticSettings::instance();settings.context(_save->getDepth(),_save->getGlobalShade());auto &profile=settings.current();
+            overlay<<"\nCAUSTIQUES - PROFIL DE MISSION\nProfondeur "<<settings.missionDepth()<<" | Obscurite "<<settings.missionShade()<<"/15\n";
+            overlay<<"PgPrec/PgSuiv: global / couches 1-5\nHaut/bas: choisir | Gauche/droite: regler | Maj: x10\nS: sauvegarder | R: reference P2ZG | Echap: fermer\n";
+            auto value=[&](int i,const char *label,int v,bool angle=false){overlay<<(_hdTuneRow==i?"> ":"  ")<<label<<": "<<(angle?v:v/10)<<(angle?" deg":" %")<<"\n";};
+            if(_hdCausticTab==0){overlay<<"ENSEMBLE\n";value(0,"Intensite",profile.intensity);value(1,"Renfort des motifs faibles",profile.weakBoost);value(2,"Presence dans cette mission",profile.presence);}
+            else {overlay<<"COUCHE "<<_hdCausticTab<<" (contribution 0 = desactivee)\n";
+                const char *labels[]={"Contribution","Vitesse","Deformation","Epaisseur","Frequence (plus = cellules petites)","Rotation supplementaire","Deplacement","Variation lumineuse"};
+                for(int j=0;j<8;++j)value(j,labels[j],profile.layers[_hdCausticTab-1][j],j==5);
+            }
+            overlay<<settings.message()<<"\nSauvegarde propre a cette profondeur ET cette obscurite.\n";
+        }
+		static bool reportedFailure = false;
+		if (!HdGpuBackend::instance().drawDebugOverlay(overlay.str()))
+		{
+			if (!reportedFailure)
+			{
+				Log(LOG_WARNING) << "[REAL HD DEBUG OVERLAY] GPU text unavailable; native raster is forbidden";
+			}
+			reportedFailure = true;
+		}
+		else reportedFailure = false;
+	}
 }
 
 void BattlescapeState::think()
@@ -1411,7 +1870,16 @@ void BattlescapeState::toggleKneelButton(BattleUnit* unit)
 	}
 	else
 	{
-		_game->getMod()->getSurfaceSet("KneelButton")->getFrame((unit && unit->isKneeled()) ? 1 : 0)->blitNShade(_btnKneel, 0, 0);
+		const int frameIndex = (unit && unit->isKneeled()) ? 1 : 0;
+		Surface *frame = _game->getMod()->getSurfaceSet("KneelButton")->getFrame(frameIndex);
+		frame->blitNShade(_btnKneel, 0, 0);
+		if (Options::hdGraphics)
+		{
+			HdUiPicture picture(frame->getWidth(), frame->getHeight());
+			picture.image(hdUiFrameDefinition("KneelButton", frameIndex, frame->getWidth(), frame->getHeight()),
+				picture.bounds(), picture.bounds());
+			_btnKneel->setHdPicture(picture);
+		}
 	}
 }
 
@@ -1800,7 +2268,7 @@ void BattlescapeState::btnLeftHandItemClick(Action *action)
 			}
 		}
 		bool middleClick = _game->isMiddleClick(action, true);
-		handleItemClick(leftHandItem, middleClick);
+		handleItemClick(leftHandItem, middleClick, false);
 	}
 }
 
@@ -1849,7 +2317,7 @@ void BattlescapeState::btnRightHandItemClick(Action *action)
 			}
 		}
 		bool middleClick = _game->isMiddleClick(action, true);
-		handleItemClick(rightHandItem, middleClick);
+		handleItemClick(rightHandItem, middleClick, true);
 	}
 }
 
@@ -2093,7 +2561,7 @@ void BattlescapeState::btnSpecialClick(Action *action)
 
 		_map->draw();
 		bool middleClick = _game->isMiddleClick(action, true);
-		handleItemClick(specialItem, middleClick);
+		handleItemClick(specialItem, middleClick, true);
 	}
 	action->getDetails()->type = SDL_NOEVENT; // consume the event
 }
@@ -2106,9 +2574,15 @@ void BattlescapeState::btnSkillsClick(Action *action)
 {
 	if (playableUnitSelected() && !_battleGame->isBusy())
 	{
-		const int popupScale = Options::getBattleUiScale();
-		const int popupX = _icons->getDisplayX();
-		const int popupY = _icons->getDisplayY() + 16 * popupScale;
+		// SkillMenuState derives from ActionMenuState and follows the same
+		// canonical UI anchor / UiFamily::Battlescape contract.
+		PresentationRect hudUi;
+		const bool haveHudUi = getBattleUiCanonicalRect(_icons, hudUi);
+		const int popupBlockWidth = 320;
+		const int popupX = haveHudUi ? (hudUi.x + hudUi.w - popupBlockWidth) : 320;
+		const int popupY = (haveHudUi ? hudUi.y : (360 - _icons->getHeight())) + 16;
+		Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-C2 R2][SKILL-ANCHOR] side=right"
+			<< " anchorUi=" << popupX << "," << popupY;
 		popup(new SkillMenuState(_battleGame->getCurrentAction(), popupX, popupY));
 	}
 	action->getDetails()->type = SDL_NOEVENT; // consume the event
@@ -2206,6 +2680,33 @@ bool BattlescapeState::playableUnitSelected()
 void BattlescapeState::drawItem(BattleItem* item, Surface* hand, std::vector<NumberText*> &ammoText, std::vector<NumberText*> &medikitText, NumberText *twoHandedText, bool drawReactionIndicator, bool drawNoReactionIndicator)
 {
 	hand->clear();
+	if (Options::hdGraphics)
+	{
+		HdUiPicture picture(hand->getWidth(), hand->getHeight());
+		if (item && !item->hasInventoryPixelProgram())
+		{
+			const int frame = item->getInventorySpriteFrame(_save, _save->getAnimFrame());
+			if (frame >= 0)
+				picture.image(hdUiFrameDefinition("BIGOBS.PCK", frame, 32, 48),
+					{0, 0, 32, 48}, {double(item->getRules()->getHandSpriteOffX()), double(item->getRules()->getHandSpriteOffY()), 32, 48});
+			if (item->getFuseTimer() >= 0)
+			{
+				const int pulse[] = {0,1,2,3,4,3,2,1};
+				auto colors = std::make_shared<HdUiIndexMap>(hdUiIdentityPalette());
+				for (int i = 1; i < 256; ++i)
+					(*colors)[i] = (item->isFuseEnabled() ? (i & 0xF0) : 32) + std::min(15, (i & 15) + pulse[_save->getAnimFrame() % 8]);
+				picture.image(hdUiFrameDefinition("SCANG.DAT", 6, 4, 4), {0,0,4,4},
+					{double(item->getRules()->getHandSpriteOffX()), double(item->getRules()->getHandSpriteOffY()),4,4}, {}, colors);
+			}
+		}
+		if (drawReactionIndicator || drawNoReactionIndicator)
+		{
+			Surface *custom = _game->getMod()->getSurface(drawReactionIndicator ? "reactionIndicator" : "noReactionIndicator", false);
+			if (custom) picture.composite(custom->getHdPicture());
+			else picture.image(hdUiFrameDefinition("SCANG.DAT", drawReactionIndicator ? 0 : 6, 4, 4), {0,0,4,4}, {28,0,4,4});
+		}
+		hand->setHdPicture(picture);
+	}
 	for (int slot = 0; slot < RuleItem::AmmoSlotMax; ++slot)
 	{
 		ammoText[slot]->setVisible(false);
@@ -2382,6 +2883,8 @@ void BattlescapeState::updateSoldierInfo(bool checkFOV)
 
 	_txtName->setText(battleUnit->getName(_game->getLanguage(), false));
 	Soldier *soldier = battleUnit->getGeoscapeSoldier();
+	HdUiPicture rankPicture(_rank->getWidth(), _rank->getHeight());
+	HdUiPicture tinyRankPicture(_rankTiny->getWidth(), _rankTiny->getHeight());
 	if (soldier != 0)
 	{
 		if (soldier->hasCallsign() && !_save->isNameDisplay())
@@ -2399,6 +2902,9 @@ void BattlescapeState::updateSoldierInfo(bool checkFOV)
 			{
 				// RC11: Legacy rank sprites stay native; HUD presentation scale is independent.
 				frame->blitNShade(_rank, 0, 0);
+				if (Options::hdGraphics)
+					rankPicture.image(hdUiFrameDefinition("SMOKE.PCK", soldier->getRankSpriteBattlescape(), frame->getWidth(), frame->getHeight()),
+						{0,0,double(frame->getWidth()),double(frame->getHeight())}, {0,0,double(frame->getWidth()),double(frame->getHeight())});
 			}
 		}
 		else
@@ -2409,10 +2915,14 @@ void BattlescapeState::updateSoldierInfo(bool checkFOV)
 			if (spr)
 			{
 				spr->blitNShade(_rankTiny, 0, 0);
+				if (Options::hdGraphics)
+					tinyRankPicture.image(hdUiFrameDefinition("TinyRanks", soldier->getRankSpriteTiny(), spr->getWidth(), spr->getHeight()),
+						{0,0,double(spr->getWidth()),double(spr->getHeight())}, {0,0,double(spr->getWidth()),double(spr->getHeight())});
 			}
 
 			// use custom background (modded)
 			customBg->blitNShade(_rank, 0, 0);
+			if (Options::hdGraphics) rankPicture.composite(customBg->getHdPicture());
 
 			// show avatar
 			Armor *customArmor = soldier->getArmor();
@@ -2433,6 +2943,8 @@ void BattlescapeState::updateSoldierInfo(bool checkFOV)
 					crop.getCrop()->h = 23;
 
 					crop.blit(_rank);
+					if (Options::hdGraphics) rankPicture.composite(surf->getHdPicture().cropped(
+						{double(soldier->getRules()->getAvatarOffsetX()), double(soldier->getRules()->getAvatarOffsetY()),26,23}));
 				}
 			}
 			else
@@ -2479,6 +2991,8 @@ void BattlescapeState::updateSoldierInfo(bool checkFOV)
 				crop.getCrop()->h = 23;
 
 				crop.blit(_rank);
+				if (Options::hdGraphics) rankPicture.composite(surf->getHdPicture().cropped(
+					{double(soldier->getRules()->getAvatarOffsetX()), double(soldier->getRules()->getAvatarOffsetY()),26,23}));
 			}
 		}
 	}
@@ -2488,6 +3002,11 @@ void BattlescapeState::updateSoldierInfo(bool checkFOV)
 		_rankTiny->clear();
 	}
 	_numTimeUnits->setValue(battleUnit->getTimeUnits());
+	if (Options::hdGraphics)
+	{
+		_rank->setHdPicture(rankPicture);
+		_rankTiny->setHdPicture(tinyRankPicture);
+	}
 	_barTimeUnits->setMax(battleUnit->getBaseStats()->tu);
 	_barTimeUnits->setValue(battleUnit->getTimeUnits());
 	_numEnergy->setValue(battleUnit->getEnergy());
@@ -2648,6 +3167,13 @@ void BattlescapeState::updateUiButton(const BattleUnit *battleUnit)
 		if (offset < SPECIAL_BUTTONS_MAX)
 		{
 			_game->getMod()->getSurfaceSet("SPICONS.DAT")->getFrame(spriteIndex)->blitNShade(btn, 0, 0);
+			if (Options::hdGraphics)
+			{
+				HdUiPicture picture(btn->getWidth(), btn->getHeight());
+				picture.image(hdUiFrameDefinition("SPICONS.DAT", spriteIndex, btn->getWidth(), btn->getHeight()),
+					picture.bounds(), picture.bounds());
+				btn->setHdPicture(picture);
+			}
 			btn->setVisible(true);
 			btn->setX(_posSpecialActions[offset]);
 			++offset;
@@ -2714,6 +3240,13 @@ void BattlescapeState::blinkVisibleUnitButtons()
 				bgColor = _indicatorPurple;
 			}
 			_btnVisibleUnit[i]->drawRect(1, 1, 13, 10, bgColor);
+			if (Options::hdGraphics)
+			{
+				HdUiPicture picture(15,12);
+				picture.fill(picture.bounds(),15);
+				picture.fill({1,1,13,10},bgColor);
+				_btnVisibleUnit[i]->setHdPicture(picture);
+			}
 		}
 	}
 
@@ -2753,8 +3286,9 @@ void BattlescapeState::blinkHealthBar()
  * Some actions result in a change of gamestate.
  * @param item Item the user clicked on (righthand/lefthand)
  * @param middleClick was it a middle click?
+ * @param rightSide True for right-hand/right-edge HUD actions, false for left hand.
  */
-void BattlescapeState::handleItemClick(BattleItem *item, bool middleClick)
+void BattlescapeState::handleItemClick(BattleItem *item, bool middleClick, bool rightSide)
 {
 	// make sure there is an item, and the battlescape is in an idle state
 	if (item && !_battleGame->isBusy())
@@ -2767,9 +3301,23 @@ void BattlescapeState::handleItemClick(BattleItem *item, bool middleClick)
 		else
 		{
 			_battleGame->getCurrentAction()->weapon = item;
-			const int popupScale = Options::getBattleUiScale();
-			const int popupX = _icons->getDisplayX();
-			const int popupY = _icons->getDisplayY() + 16 * popupScale;
+			// BATTLE_UI_FAMILY_V1-C2: ActionMenuState belongs to the same fixed
+			// Battlescape UI space as the HUD. Derive its anchor from the canonical
+			// HUD rectangle, never from getDisplayX/Y() (which already contains the
+			// variable World transform at x1/x2/x6).
+			PresentationRect hudUi;
+			const bool haveHudUi = getBattleUiCanonicalRect(_icons, hudUi);
+			// V1-C2 R2: preserve the original hand-side semantic in canonical UI
+			// space. The popup occupies a 320-wide logical block: left hand uses
+			// the left half, right/special hand uses the mirrored right half.
+			const int popupBlockWidth = 320;
+			const int popupX = rightSide
+				? (haveHudUi ? (hudUi.x + hudUi.w - popupBlockWidth) : 320)
+				: (haveHudUi ? hudUi.x : 0);
+			const int popupY = (haveHudUi ? hudUi.y : (360 - _icons->getHeight())) + 16;
+			Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-C2 R2][ACTION-ANCHOR] side="
+				<< (rightSide ? "right" : "left")
+				<< " anchorUi=" << popupX << "," << popupY;
 			popup(new ActionMenuState(_battleGame->getCurrentAction(), popupX, popupY));
 			if (item->getRules()->getBattleType() == BT_FIREARM)
 			{
@@ -2946,6 +3494,114 @@ inline void BattlescapeState::handle(Action *action)
 {
 	if (!_firstInit)
 	{
+		// Handle the native GPU performance overlay before surface dispatch.
+		if (action->getDetails()->type == SDL_KEYDOWN)
+		{
+			const SDLKey hdHotkey = action->getDetails()->key.keysym.sym;
+			const SDLMod eventMods = action->getDetails()->key.keysym.mod;
+			const bool hdCtrl = ((eventMods & KMOD_CTRL) != 0) || ((SDL_GetModState() & KMOD_CTRL) != 0);
+            if(Options::hdGraphics && hdCtrl && hdHotkey==SDLK_F9){
+                if(_hdTunePage==3)_hdTunePage=-1;else{_hdTunePage=3;_hdTuneRow=0;}
+                return;
+            }
+            if(Options::hdGraphics && _hdTunePage==3){
+                auto &settings=HdCausticSettings::instance();settings.context(_save->getDepth(),_save->getGlobalShade());auto &profile=settings.current();
+                if(hdHotkey==SDLK_ESCAPE){_hdTunePage=-1;return;}
+                if(hdHotkey==SDLK_s){settings.save();return;}
+                if(hdHotkey==SDLK_r){settings.reset();return;}
+                if(hdHotkey==SDLK_PAGEUP || hdHotkey==SDLK_PAGEDOWN){_hdCausticTab=(_hdCausticTab+(hdHotkey==SDLK_PAGEDOWN?1:5))%6;_hdTuneRow=0;return;}
+                const int rows=_hdCausticTab==0?3:8;
+                if(hdHotkey==SDLK_UP || hdHotkey==SDLK_DOWN){_hdTuneRow=(_hdTuneRow+(hdHotkey==SDLK_DOWN?1:rows-1))%rows;return;}
+                if(hdHotkey==SDLK_LEFT || hdHotkey==SDLK_RIGHT){
+                    int &v=_hdCausticTab==0?(_hdTuneRow==0?profile.intensity:(_hdTuneRow==1?profile.weakBoost:profile.presence)):profile.layers[_hdCausticTab-1][_hdTuneRow];
+                    const bool angle=_hdCausticTab>0 && _hdTuneRow==5;
+                    int step=(angle?1:10)*((eventMods & KMOD_SHIFT)?10:1);
+                    const int lo=angle?-180:(_hdCausticTab>0 && _hdTuneRow==4?250:0);
+                    v=std::clamp(v+(hdHotkey==SDLK_RIGHT?step:-step),lo,angle?180:(_hdCausticTab==0 && _hdTuneRow==2?2000:3000));settings.changed();return;
+                }
+                return;
+            }
+			// Native REAL HD tuning uses SDL keys and the D3D text panel. None of
+			// these controls dispatches through an OXCE popup or widget raster.
+			if (Options::hdGraphics && hdCtrl &&
+				(hdHotkey == SDLK_F5 || hdHotkey == SDLK_F6 || hdHotkey == SDLK_F7))
+			{
+				const int page = hdHotkey == SDLK_F5 ? 0 : hdHotkey == SDLK_F6 ? 1 : 2;
+				if (_hdTunePage == page) { _hdTunePage = -1; Options::save(); }
+				else { _hdTunePage = page; _hdTuneRow = 0; }
+				return;
+			}
+			if (Options::hdGraphics && _hdTunePage >= 0)
+			{
+				const int rows = _hdTunePage == 2 ? 5 : 7;
+				if (hdHotkey == SDLK_ESCAPE)
+				{
+					_hdTunePage = -1; Options::save(); return;
+				}
+				if (hdHotkey == SDLK_UP || hdHotkey == SDLK_DOWN)
+				{
+					_hdTuneRow = (_hdTuneRow + (hdHotkey == SDLK_DOWN ? 1 : rows - 1)) % rows;
+					return;
+				}
+				if (hdHotkey == SDLK_LEFT || hdHotkey == SDLK_RIGHT || hdHotkey == SDLK_RETURN)
+				{
+					const int dir = hdHotkey == SDLK_LEFT ? -1 : 1;
+					const int step = (eventMods & KMOD_SHIFT) ? 100 : 10;
+					auto adjust = [&](int &value, int lo, int hi, int unit)
+					{
+						value = std::max(lo, std::min(hi, value + dir * unit));
+					};
+					if (_hdTunePage == 0)
+					{
+						switch (_hdTuneRow)
+						{
+						case 0: Options::hdEnvironmentGrade = !Options::hdEnvironmentGrade; break;
+						case 1: Options::hdDepthLuminance = !Options::hdDepthLuminance; break;
+						case 2: adjust(Options::hdBedrockLutTopPermille, 0, 2000, step); break;
+						case 3: adjust(Options::hdBedrockLutVerticalPermille, 0, 2000, step); break;
+						case 4: adjust(Options::hdBedrockLutCoveredPermille, 0, 2000, step); break;
+						case 5: adjust(Options::hdBedrockLumaD1Permille, 0, 2000, step); break;
+						case 6: adjust(Options::hdBedrockLumaD3Permille, 0, 2000, step); break;
+						}
+					}
+					else if (_hdTunePage == 1)
+					{
+						switch (_hdTuneRow)
+						{
+						case 0: Options::hdLocalLightsEnabled = !Options::hdLocalLightsEnabled; break;
+						case 1: adjust(Options::hdLocalLightIntensityPermille, 0, 3000, step); break;
+						case 2: adjust(Options::hdLocalLightRadiusPermille, 0, 3000, step); break;
+						case 3: Options::hdSurfaceSunlightEnabled = !Options::hdSurfaceSunlightEnabled; break;
+						case 4: adjust(Options::hdSunlightIntensityPermille, 0, 3000, step); break;
+						case 5: adjust(Options::hdAmbientLightPermille, 0, 3000, step); break;
+						case 6: adjust(Options::hdShadowStrengthPermille, 0, 3000, step); break;
+						}
+					}
+					else
+					{
+						const int angleStep = (eventMods & KMOD_SHIFT) ? 5000 : 1000;
+						switch (_hdTuneRow)
+						{
+						case 0: adjust(Options::hdFogEdgeSoftnessPermille, 0, 1000, step); break;
+						case 1: adjust(Options::hdFovBaseHalfAngleMilliDeg, 10000, 90000, angleStep); break;
+						case 2: adjust(Options::hdFovPlasticAquaHalfAngleMilliDeg, 10000, 90000, angleStep); break;
+						case 3: adjust(Options::hdFovIonHalfAngleMilliDeg, 10000, 90000, angleStep); break;
+						case 4: adjust(Options::hdFovMagneticIonHalfAngleMilliDeg, 10000, 90000, angleStep); break;
+						}
+					}
+					if (_map) _map->invalidate(true);
+					return;
+				}
+			}
+			if (Options::hdGraphics && hdCtrl && hdHotkey == SDLK_F8)
+			{
+				Options::hdDebugOverlay = !Options::hdDebugOverlay;
+				Log(LOG_INFO) << "[HD HOTKEY V2] Ctrl+F8 -> debug overlay visible=" << (Options::hdDebugOverlay ? 1 : 0);
+				warningRaw(Options::hdDebugOverlay ? "HD debug overlay: ON" : "HD debug overlay: OFF");
+				return;
+			}
+		}
+
 		if (action->getDetails()->type == SDL_KEYDOWN && action->getDetails()->key.keysym.sym == Options::keyBattleToggleHud
 			&& !_game->isCtrlPressed() && !_game->isShiftPressed() && !_game->isAltPressed())
 		{
@@ -3073,12 +3729,11 @@ inline void BattlescapeState::handle(Action *action)
 						}
 					}
 				}
-				// "ctrl-F8" - toggle authored HD Battlescape environment grade for A/B texture testing.
-				else if (key == SDLK_F8 && ctrlPressed)
+				// "ctrl-F4" - hot reload authored HD assets/materials from disk without changing semantic ownership.
+				else if (key == SDLK_F4 && ctrlPressed)
 				{
-					Options::hdEnvironmentGrade = !Options::hdEnvironmentGrade;
-					_map->invalidate(true);
-					warningRaw(Options::hdEnvironmentGrade ? "HD environment grade: ON" : "HD environment grade: OFF");
+					_map->reloadHdResources();
+					warningRaw("HD resources reloaded (same-path PNG + GPU mip cache)");
 				}
 				// "ctrl-Home" - reset default palettes
 				else if (key == SDLK_HOME && ctrlPressed)
@@ -3287,6 +3942,7 @@ inline void BattlescapeState::handle(Action *action)
 					if (key == SDLK_d && ctrlPressed)
 					{
 						_save->setDebugMode();
+						_map->invalidate();
 						debug("Debug Mode");
 					}
 					// "ctrl-v" - reset tile visibility
@@ -4319,6 +4975,7 @@ void BattlescapeState::resize(int &dX, int &dY)
 	_map->setHeight(Options::baseYResolution);
 	_map->getCamera()->resize();
 	_map->getCamera()->jumpXY(dX/2, dY/2);
+	updateBattleUiViewportReservation();
 
 	for (auto* surf : _surfaces)
 	{
@@ -4340,6 +4997,21 @@ void BattlescapeState::resize(int &dX, int &dY)
 	for (auto& pos : _posSpecialActions)
 	{
 		pos += dX;
+	}
+
+	updateBattleUiInputTransforms();
+
+	{
+		const Position traceOffset = _map->getCamera()->getMapOffset();
+		const PresentationContext &pc = _game->getScreen()->getPresentationContext();
+		Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][BATTLE-RESIZE] delta=" << dX << "," << dY
+			<< " base=" << Options::baseXResolution << "x" << Options::baseYResolution
+			<< " map=" << _map->getWidth() << "x" << _map->getHeight()
+			<< " mapOffset=" << traceOffset.x << "," << traceOffset.y << "," << traceOffset.z
+			<< " worldScaleOpt=" << Options::battlescapeScale
+			<< " uiScale=" << Options::getBattleUiScale()
+			<< " pcLogical=" << pc.logicalWidth() << "x" << pc.logicalHeight()
+			<< " pcScale=" << pc.scaleX() << "x" << pc.scaleY();
 	}
 
 }

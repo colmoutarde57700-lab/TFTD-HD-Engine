@@ -18,6 +18,10 @@
  */
 #include "InteractiveSurface.h"
 #include "Action.h"
+#include "Logger.h"
+#include "Options.h"
+#include "PresentationSpaces.h"
+#include <typeinfo>
 
 namespace OpenXcom
 {
@@ -31,7 +35,7 @@ const SDLKey InteractiveSurface::SDLK_ANY = (SDLKey)-1; // using an unused keyco
  * @param x X position in pixels.
  * @param y Y position in pixels.
  */
-InteractiveSurface::InteractiveSurface(int width, int height, int x, int y) : Surface(width, height, x, y), _buttonsPressed(0), _in(0), _over(0), _out(0), _isHovered(false), _isFocused(true), _listButton(false), _tftdMode(false)
+InteractiveSurface::InteractiveSurface(int width, int height, int x, int y) : Surface(width, height, x, y), _buttonsPressed(0), _presentationInputEnabled(false), _presentationInputX(0), _presentationInputY(0), _presentationInputW(0), _presentationInputH(0), _presentationInputPhysicalX(0), _presentationInputPhysicalY(0), _presentationInputScaleX(1.0), _presentationInputScaleY(1.0), _in(0), _over(0), _out(0), _isHovered(false), _isFocused(true), _listButton(false), _tftdMode(false)
 {
 }
 
@@ -40,6 +44,25 @@ InteractiveSurface::InteractiveSurface(int width, int height, int x, int y) : Su
  */
 InteractiveSurface::~InteractiveSurface()
 {
+}
+
+void InteractiveSurface::setPresentationInputTransform(int logicalX, int logicalY, int logicalW, int logicalH,
+	int physicalX, int physicalY, double scaleX, double scaleY)
+{
+	_presentationInputEnabled = logicalW > 0 && logicalH > 0 && scaleX > 0.0 && scaleY > 0.0;
+	_presentationInputX = logicalX;
+	_presentationInputY = logicalY;
+	_presentationInputW = logicalW;
+	_presentationInputH = logicalH;
+	_presentationInputPhysicalX = physicalX;
+	_presentationInputPhysicalY = physicalY;
+	_presentationInputScaleX = scaleX > 0.0 ? scaleX : 1.0;
+	_presentationInputScaleY = scaleY > 0.0 ? scaleY : 1.0;
+}
+
+void InteractiveSurface::clearPresentationInputTransform()
+{
+	_presentationInputEnabled = false;
 }
 
 bool InteractiveSurface::isButtonHandled(Uint8 button)
@@ -114,6 +137,12 @@ void InteractiveSurface::handle(Action *action, State *state)
 	const int displayY = _displayAnchorY + (getY() - _displayAnchorY) * _displayScale;
 	const int displayRight = _displayAnchorX + ((getX() - _displayAnchorX) + getWidth()) * _displayScale;
 	const int displayBottom = _displayAnchorY + ((getY() - _displayAnchorY) + getHeight()) * _displayScale;
+	double hitX = -1.0;
+	double hitY = -1.0;
+	int hitLeft = displayX;
+	int hitTop = displayY;
+	int hitRight = displayRight;
+	int hitBottom = displayBottom;
 
 	if (action->getDetails()->type == SDL_MOUSEBUTTONUP || action->getDetails()->type == SDL_MOUSEBUTTONDOWN)
 	{
@@ -128,12 +157,48 @@ void InteractiveSurface::handle(Action *action, State *state)
 
 	if (action->isMouseAction())
 	{
+		if (_presentationInputEnabled)
+		{
+			int physicalX = -1;
+			int physicalY = -1;
+			if (action->getDetails()->type == SDL_MOUSEBUTTONUP || action->getDetails()->type == SDL_MOUSEBUTTONDOWN)
+			{
+				physicalX = action->getDetails()->button.x;
+				physicalY = action->getDetails()->button.y;
+			}
+			else if (action->getDetails()->type == SDL_MOUSEMOTION)
+			{
+				physicalX = action->getDetails()->motion.x;
+				physicalY = action->getDetails()->motion.y;
+			}
+			if (physicalX >= 0 && physicalY >= 0)
+			{
+				hitX = (physicalX - _presentationInputPhysicalX) / _presentationInputScaleX;
+				hitY = (physicalY - _presentationInputPhysicalY) / _presentationInputScaleY;
+					// BATTLE_UI_FAMILY_V1-B: once a Surface belongs to an explicit
+					// presentation space, Action's absolute/relative mouse queries must
+					// describe that SAME logical space, not the current World canvas.
+					// This preserves Slider/ComboBox/TextList legacy math while divorcing
+					// the UI from battlescapeScale.
+					action->setLogicalMouseOverride(hitX, hitY);
+				hitLeft = _presentationInputX;
+				hitTop = _presentationInputY;
+				hitRight = _presentationInputX + _presentationInputW;
+				hitBottom = _presentationInputY + _presentationInputH;
+			}
+		}
+		else
+		{
+			hitX = action->getDisplayXMouse();
+			hitY = action->getDisplayYMouse();
+		}
+
 		// Hit-testing happens in DISPLAY logical coordinates. Once inside,
 		// handlers see getAbsolute*Mouse() inverse-transformed back into the
 		// original 320x200-era coordinate system, so legacy UI math continues
 		// to work without per-screen hacks.
-		if ((action->getDisplayXMouse() >= displayX && action->getDisplayXMouse() < displayRight) &&
-			(action->getDisplayYMouse() >= displayY && action->getDisplayYMouse() < displayBottom))
+		if ((hitX >= hitLeft && hitX < hitRight) &&
+			(hitY >= hitTop && hitY < hitBottom))
 		{
 			if (!_isHovered)
 			{
@@ -178,6 +243,57 @@ void InteractiveSurface::handle(Action *action, State *state)
 
 	if (action->getDetails()->type == SDL_MOUSEBUTTONDOWN)
 	{
+		if (_isHovered && isButtonHandled(action->getDetails()->button.button))
+		{
+			Log(LOG_INFO) << "[PRESENTATION-SPACES TRACE V1][INPUT] state="
+				<< (state ? typeid(*state).name() : "<null>")
+				<< " surface=" << typeid(*this).name()
+				<< " physical=" << action->getDetails()->button.x << "," << action->getDetails()->button.y
+				<< " displayLogical=" << action->getDisplayXMouse() << "," << action->getDisplayYMouse()
+				<< " originalLogical=" << action->getAbsoluteXMouse() << "," << action->getAbsoluteYMouse()
+				<< " screenScale=" << action->getXScale() << "x" << action->getYScale()
+				<< " bands(LT)=" << action->getLeftBlackBand() << "," << action->getTopBlackBand()
+				<< " surfaceLogical=" << getX() << "," << getY() << "," << getWidth() << "x" << getHeight()
+				<< " surfaceDisplay=" << displayX << "," << displayY << "," << (displayRight-displayX) << "x" << (displayBottom-displayY)
+				<< " displayScale=" << _displayScale
+				<< " anchor=" << _displayAnchorX << "," << _displayAnchorY;
+			if (_presentationInputEnabled)
+			{
+				Log(LOG_INFO) << "[BATTLE-UI INPUT CUTOVER V1] state="
+					<< (state ? typeid(*state).name() : "<null>")
+					<< " surface=" << typeid(*this).name()
+					<< " physical=" << action->getDetails()->button.x << "," << action->getDetails()->button.y
+					<< " uiLogical=" << hitX << "," << hitY
+					<< " uiRect=" << _presentationInputX << "," << _presentationInputY << ","
+					<< _presentationInputW << "x" << _presentationInputH
+					<< " uiScale=" << _presentationInputScaleX << "x" << _presentationInputScaleY
+						<< " physicalOrigin=" << _presentationInputPhysicalX << "," << _presentationInputPhysicalY
+						<< " actionAbs=" << action->getAbsoluteXMouse() << "," << action->getAbsoluteYMouse()
+						<< " actionRel=" << action->getRelativeXMouse() << "," << action->getRelativeYMouse();
+			}
+			// CONTRACT V1 SHADOW R2: calculate the candidate UI-space inverse
+			// independently of the historical world/base canvas. This is diagnostic
+			// only; event dispatch and hit-testing still use the legacy Action values.
+			const PresentationTransform shadowUi = PresentationSpacesContract::uniformUiFit(
+				640, 360, Options::displayWidth, Options::displayHeight);
+			const double shadowUiX = shadowUi.physicalToLogicalX(action->getDetails()->button.x);
+			const double shadowUiY = shadowUi.physicalToLogicalY(action->getDetails()->button.y);
+			const bool shadowUiInside =
+				action->getDetails()->button.x >= shadowUi.physicalContent.x &&
+				action->getDetails()->button.x < shadowUi.physicalContent.x + shadowUi.physicalContent.w &&
+				action->getDetails()->button.y >= shadowUi.physicalContent.y &&
+				action->getDetails()->button.y < shadowUi.physicalContent.y + shadowUi.physicalContent.h;
+			Log(LOG_INFO) << "[PRESENTATION-SPACES CONTRACT V1 R2][INPUT-SHADOW] state="
+				<< (state ? typeid(*state).name() : "<null>")
+				<< " surface=" << typeid(*this).name()
+				<< " physical=" << action->getDetails()->button.x << "," << action->getDetails()->button.y
+				<< " legacyDisplayLogical=" << action->getDisplayXMouse() << "," << action->getDisplayYMouse()
+				<< " uiLogicalCandidate=" << shadowUiX << "," << shadowUiY
+				<< " uiScale=" << shadowUi.scaleX << "x" << shadowUi.scaleY
+				<< " uiContent=" << shadowUi.physicalContent.x << "," << shadowUi.physicalContent.y << ","
+				<< shadowUi.physicalContent.w << "x" << shadowUi.physicalContent.h
+				<< " inside=" << (shadowUiInside ? 1 : 0);
+		}
 		if (_isHovered && !isButtonPressed(action->getDetails()->button.button))
 		{
 			setButtonPressed(action->getDetails()->button.button, true);

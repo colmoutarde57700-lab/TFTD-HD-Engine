@@ -63,7 +63,7 @@ namespace OpenXcom
  * Initializes a brand new battlescape saved game.
  */
 SavedBattleGame::SavedBattleGame(Mod *rule, Language *lang, bool isPreview) :
-	_isPreview(isPreview), _craftPos(), _craftZ(0), _craftForPreview(nullptr),
+	_isPreview(isPreview), _testEmptyHostileSandbox(false), _bedrockRenderMaterial(), _bedrockCraterStamps(), _bedrockCraterDiametersMilliTiles(), _bedrockCraterRevision(0), _craftPos(), _craftZ(0), _craftForPreview(nullptr),
 	_battleState(0), _rule(rule), _mapsize_x(0), _mapsize_y(0), _mapsize_z(0), _selectedUnit(0), _undoUnit(nullptr),
 	_lastSelectedUnit(0), _pathfinding(0), _tileEngine(0),
 	_reinforcementsItemLevel(0), _startingCondition(nullptr), _enviroEffects(nullptr), _ecEnabledFriendly(false), _ecEnabledHostile(false), _ecEnabledNeutral(false),
@@ -142,6 +142,16 @@ void SavedBattleGame::load(const YAML::YamlNodeReader& node, Mod *mod, SavedGame
 	initMap(mapsize_x, mapsize_y, mapsize_z);
 
 	reader.tryRead("missionType", _missionType);
+	reader.tryRead("testEmptyHostileSandbox", _testEmptyHostileSandbox);
+	reader.tryRead("bedrockRenderMaterial", _bedrockRenderMaterial);
+	reader.tryRead("bedrockCraterStamps", _bedrockCraterStamps);
+	reader.tryRead("bedrockCraterDiametersMilliTiles", _bedrockCraterDiametersMilliTiles);
+	// Backward compatibility with CRATER FIELD V1 saves, which stored only centers.
+	if (_bedrockCraterDiametersMilliTiles.size() < _bedrockCraterStamps.size())
+		_bedrockCraterDiametersMilliTiles.resize(_bedrockCraterStamps.size(), 1000);
+	else if (_bedrockCraterDiametersMilliTiles.size() > _bedrockCraterStamps.size())
+		_bedrockCraterDiametersMilliTiles.resize(_bedrockCraterStamps.size());
+	_bedrockCraterRevision = (unsigned long long)_bedrockCraterStamps.size();
 	reader.tryRead("strTarget", _strTarget);
 	reader.tryRead("strCraftOrBase", _strCraftOrBase);
 	if (reader["startingConditionType"])
@@ -539,6 +549,19 @@ void SavedBattleGame::save(YAML::YamlNodeWriter writer) const
 	writer.write("length", _mapsize_y);
 	writer.write("height", _mapsize_z);
 	writer.write("missionType", _missionType);
+	if (_testEmptyHostileSandbox)
+	{
+		writer.write("testEmptyHostileSandbox", true);
+	}
+	if (!_bedrockRenderMaterial.empty())
+	{
+		writer.write("bedrockRenderMaterial", _bedrockRenderMaterial);
+	}
+	if (!_bedrockCraterStamps.empty())
+	{
+		writer.write("bedrockCraterStamps", _bedrockCraterStamps);
+		writer.write("bedrockCraterDiametersMilliTiles", _bedrockCraterDiametersMilliTiles);
+	}
 	writer.write("strTarget", _strTarget);
 	writer.write("strCraftOrBase", _strCraftOrBase).setAsQuotedAndEscaped();
 	if (_startingCondition)
@@ -1740,6 +1763,8 @@ void SavedBattleGame::revealMap()
 	for (int i = 0; i < _mapsize_z * _mapsize_y * _mapsize_x; ++i)
 	{
 		_tiles[i].setDiscovered(true, O_FLOOR);
+		_tiles[i].setDiscovered(true, O_WESTWALL);
+		_tiles[i].setDiscovered(true, O_NORTHWALL);
 	}
 }
 
@@ -2563,7 +2588,11 @@ void SavedBattleGame::prepareNewTurn()
 		if (tileOnSmoke->getFire() == 0)
 		{
 			// reduce the smoke counter
-			tileOnSmoke->setSmoke(tileOnSmoke->getSmoke() - 1);
+			// Dissipation is simulation state, independent of the graphics mode.
+			// Water disperses the cloud faster; fire intensity retains its own timer.
+			const int dissipation = getDepth() > 0
+				? std::clamp(Options::underwaterSmokeDissipation, 1, 15) : 1;
+			tileOnSmoke->setSmoke(tileOnSmoke->getSmoke() - dissipation);
 			// if we're still smoking
 			if (tileOnSmoke->getSmoke())
 			{

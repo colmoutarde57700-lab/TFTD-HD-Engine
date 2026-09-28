@@ -57,6 +57,7 @@ private:
 	Timer *_animTimer;
 	int _depth, _groundSlotsX, _groundSlotsY;
 	int _xMax;
+	bool _hdShowTuCost = false;
 	RuleInventory *_inventorySlotRightHand = nullptr;
 	RuleInventory *_inventorySlotLeftHand = nullptr;
 	RuleInventory *_inventorySlotBackPack = nullptr;
@@ -86,6 +87,7 @@ public:
 	void setSelectedUnit(BattleUnit *unit, bool resetGroundOffset);
 	/// Draws the inventory.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Draws the inventory grid.
 	void drawGrid();
 	/// Draws the inventory grid labels.
@@ -106,6 +108,8 @@ public:
 	void setMouseOverItem(BattleItem *item);
 	/// Handles timers.
 	void think() override;
+	/// Builds the composite inventory pixels used by both legacy blit and direct physical presentation.
+	SDL_Surface *getPresentationSurface() override;
 	/// Blits the inventory onto another surface.
 	void blit(SDL_Surface *surface) override;
 	/// Special handling for mouse hovers.

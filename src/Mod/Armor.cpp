@@ -87,6 +87,8 @@ void Armor::load(const YAML::YamlNodeReader& node, Mod *mod, const ModScript &pa
 	reader.tryRead("fullBodySprite", _fullBodySprite);
 	reader.tryRead("fullBodySpriteRoot", _fullBodySpriteRoot);
 	reader.tryRead("hdUnitPartsRoot", _hdUnitPartsRoot);
+	reader.tryRead("hdUnit3DModel", _hdUnit3DModel);
+	reader.tryRead("hdUnit3DHeight", _hdUnit3DHeight);
 	reader.tryRead("hdUnitPartsScale", _hdUnitPartsScale);
 	reader.tryRead("fullBodySpriteScale", _fullBodySpriteScale);
 	reader.tryRead("fullBodySpriteOffsetX", _fullBodySpriteOffsetX);

@@ -87,6 +87,17 @@ public:
 
 private:
 	bool _isPreview;
+	bool _testEmptyHostileSandbox;
+	std::string _bedrockRenderMaterial;
+	// Presentation-only persistent crater events for BEDROCK. Coordinates are stored
+	// in OXCE voxel space so sub-tile explosion centers survive save/load exactly.
+	std::vector<Position> _bedrockCraterStamps;
+	// Visual diameter for each crater stamp, in 1/1000th of a world tile. Kept
+	// separate from gameplay blast radius so large volumetric explosions remain
+	// visually restrained while still scaling by explosive strength/type.
+	std::vector<int> _bedrockCraterDiametersMilliTiles;
+	unsigned long long _bedrockCraterRevision;
+	unsigned long long _realHdGeometryRevision = 0;
 	SDL_Rect _craftPos;
 	int _craftZ;
 	Craft* _craftForPreview;
@@ -178,6 +189,29 @@ public:
 	void setMissionType(const std::string &missionType);
 	/// Gets the mission type.
 	const std::string &getMissionType() const;
+	/// Marks this battle as the explicit zero-hostile graphics-test sandbox.
+	void setTestEmptyHostileSandbox(bool value) { _testEmptyHostileSandbox = value; }
+	/// Gets whether zero hostile units are intentional for this test battle.
+	bool isTestEmptyHostileSandbox() const { return _testEmptyHostileSandbox; }
+	/// Sets the renderer-only primary terrain material. Empty means no BEDROCK override.
+	void setBedrockRenderMaterial(const std::string &value) { _bedrockRenderMaterial = value; }
+	/// Gets the renderer-only primary terrain material.
+	const std::string &getBedrockRenderMaterial() const { return _bedrockRenderMaterial; }
+	/// Records one presentation-only BEDROCK crater at an OXCE voxel-space center.
+	void addBedrockCraterStamp(const Position &voxelCenter, int diameterMilliTiles)
+	{
+		_bedrockCraterStamps.push_back(voxelCenter);
+		_bedrockCraterDiametersMilliTiles.push_back(diameterMilliTiles > 0 ? diameterMilliTiles : 1000);
+		++_bedrockCraterRevision;
+	}
+	/// Persistent crater events used to rebuild the merged world-space crater field.
+	const std::vector<Position> &getBedrockCraterStamps() const { return _bedrockCraterStamps; }
+	/// Per-stamp visual diameter in 1/1000th of a world tile.
+	const std::vector<int> &getBedrockCraterDiametersMilliTiles() const { return _bedrockCraterDiametersMilliTiles; }
+	/// Changes whenever crater presentation data changes.
+	unsigned long long getBedrockCraterRevision() const { return _bedrockCraterRevision; }
+	void markRealHdGeometryChanged() { ++_realHdGeometryRevision; }
+	unsigned long long getRealHdGeometryRevision() const { return _realHdGeometryRevision; }
 	/// Sets the mission target.
 	void setMissionTarget(const std::string& missionTarget) { _strTarget = missionTarget; }
 	/// Gets the mission target.

@@ -1,3 +1,4 @@
+#include "HdRenderTrace.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -29,6 +30,7 @@
 #include "FlcPlayer.h"
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <string.h>
 #include <SDL_mixer.h>
 #include "FileMap.h"
@@ -36,6 +38,8 @@
 #include "Screen.h"
 #include "Options.h"
 #include "Game.h"
+#include "Exception.h"
+#include "HdPngResolver.h"
 
 namespace OpenXcom
 {
@@ -79,7 +83,7 @@ enum PlayingState
 	SKIPPED
 };
 
-FlcPlayer::FlcPlayer() : _fileBuf(0), _mainScreen(0), _realScreen(0), _forcedLegacy8Bit(false), _game(0)
+FlcPlayer::FlcPlayer() : _fileBuf(0), _mainScreen(0), _realScreen(0), _hdPlayback(false), _game(0)
 {
 	_volume = Game::volumeExponent(Options::musicVolume);
 }
@@ -107,15 +111,27 @@ bool FlcPlayer::init(const char *filename, void(*frameCallBack)(), Game *game, b
 
 	_frameCallBack = frameCallBack;
 	_realScreen = game->getScreen();
-	// FLI/FLC decoders write indexed pixels and update palettes while decoding.
-	// Keep that legacy path genuinely 8-bit instead of forcing it through the
-	// HD 32-bit framebuffer; this preserves the original intro colours exactly.
-	_forcedLegacy8Bit = Options::hdGraphics && _realScreen->getSurface()->format->BitsPerPixel != 8;
-	if (_forcedLegacy8Bit)
-	{
-		_realScreen->setForceLegacy8Bit(true);
-	}
-	_realScreen->clear();
+	_hdPlayback = false; // R4: native cinematic decoding until an explicit per-film migration.
+	_hdFamily = filename;
+	const auto separator = _hdFamily.find_last_of("/\\");
+	if (separator != std::string::npos) _hdFamily.erase(0, separator + 1);
+	const auto extension = _hdFamily.find_last_of('.');
+	if (extension != std::string::npos) _hdFamily.erase(extension);
+	std::transform(_hdFamily.begin(), _hdFamily.end(), _hdFamily.begin(),
+		[](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+	if (Options::hdGraphics)
+		hdTraceRoute("cinematic-policy", _hdFamily, "LEGACY_NATIVE", "R4 staged migration: original cinematic decoder", true);
+	_realScreen->discardHdCanvas();
+	if (_hdPlayback)
+    {
+        try { _realScreen->clearHdCanvas(); }
+        catch (const std::exception &error)
+        {
+            hdTraceRoute("cinematic", _hdFamily, "LEGACY_NATIVE", error.what(), true);
+            _hdPlayback = false; _realScreen->discardHdCanvas(); _realScreen->clear();
+        }
+    }
+    else _realScreen->clear();
 	_game = game;
 	_useInternalAudio = useInternalAudio;
 	_dx = dx;
@@ -164,8 +180,14 @@ bool FlcPlayer::init(const char *filename, void(*frameCallBack)(), Game *game, b
 		Options::baseYResolution = _screenHeight;
 		_realScreen->resetDisplay();
 	}
-	// If the current surface used is at 8bpp use it
-	if (_realScreen->getSurface()->format->BitsPerPixel == 8)
+	// HD uses the container only for timing and sound. Do not allocate an
+	// indexed video raster, decode its image chunks, or change display palette.
+	if (_hdPlayback)
+	{
+		_mainScreen = nullptr;
+		Log(LOG_INFO) << "[HD CINEMATIC] " << _hdFamily << " PNG presentation; container audio/timing only";
+	}
+	else if (_realScreen->getSurface()->format->BitsPerPixel == 8)
 	{
 		_mainScreen = _realScreen->getSurface();
 	}
@@ -195,11 +217,6 @@ void FlcPlayer::deInit()
 		deInitAudio();
 	}
 
-	if (_forcedLegacy8Bit && _realScreen)
-	{
-		_forcedLegacy8Bit = false;
-		_realScreen->setForceLegacy8Bit(false);
-	}
 }
 
 /**
@@ -210,9 +227,9 @@ void FlcPlayer::play(bool skipLastFrame)
 	_playingState = PLAYING;
 
 	// Vertically center the video
-	_dy = (_mainScreen->h - _headerHeight) / 2;
-
-	_offset = _dy * _mainScreen->pitch + _mainScreen->format->BytesPerPixel * _dx;
+	_dy = ((_hdPlayback ? _realScreen->getSurface()->h : _mainScreen->h) - _headerHeight) / 2;
+	if (!_hdPlayback)
+		_offset = _dy * _mainScreen->pitch + _mainScreen->format->BytesPerPixel * _dx;
 
 	// Skip file header
 	_videoFrameData = _fileBuf + 128;
@@ -267,6 +284,15 @@ void FlcPlayer::SDLPolling()
 					_realScreen->resetDisplay();
 					_mainScreen = _realScreen->getSurface();
 				}
+				if (_hdPlayback)
+                {
+                    try { _realScreen->fadeHdCanvas(1.0); }
+                    catch (const std::exception &error)
+                    {
+                        hdTraceRoute("cinematic", _hdFamily, "LEGACY_NATIVE", error.what(), true);
+                        reconstructNativeVideo();
+                    }
+                }
 			}
 			break;
 		case SDL_QUIT:
@@ -403,6 +429,46 @@ void FlcPlayer::decodeVideo(bool skipLastFrame)
 void FlcPlayer::playVideoFrame()
 {
 	++_frameCount;
+	if (_hdPlayback)
+	{
+        try { playHdVideoFrame(); return; }
+        catch (const std::exception &error)
+        {
+            hdTraceRoute("cinematic", _hdFamily + ":" + std::to_string(_frameCount - 1),
+                "LEGACY_NATIVE", std::string(error.what()) + "; reconstruct delta stream; native until movie ends", true);
+            reconstructNativeVideo();
+        }
+    }
+    else decodeNativeVideoChunks();
+    if (_mainScreen != _realScreen->getSurface())
+        SDL_BlitSurface(_mainScreen, nullptr, _realScreen->getSurface(), nullptr);
+    _realScreen->flip();
+}
+
+void FlcPlayer::reconstructNativeVideo()
+{
+    _hdPlayback = false;
+    _realScreen->discardHdCanvas();
+    _mainScreen = SDL_AllocSurface(SDL_SWSURFACE, _realScreen->getSurface()->w, _realScreen->getSurface()->h, 8, 0, 0, 0, 0);
+    if (!_mainScreen) throw Exception(SDL_GetError());
+    _offset = _dy * _mainScreen->pitch + _dx;
+    Uint8 *packet = _fileBuf + 128;
+    while (packet < _videoFrameData)
+    {
+        Uint32 size; Uint16 type;
+        if (!isValidFrame(packet, size, type) || size == 0) throw Exception("Invalid cinematic fallback packet");
+        if (type == FRAME_TYPE)
+        {
+            readU16(_frameChunks, packet + 6);
+            _chunkData = packet + 16;
+            decodeNativeVideoChunks();
+        }
+        packet += size + (type == AUDIO_CHUNK ? 16 : 0);
+    }
+}
+
+void FlcPlayer::decodeNativeVideoChunks()
+{
 	if (SDL_LockSurface(_mainScreen) < 0)
 		return;
 	int chunkCount = _frameChunks;
@@ -447,12 +513,31 @@ void FlcPlayer::playVideoFrame()
 
 	SDL_UnlockSurface(_mainScreen);
 
-	/* TODO: Track which rectangles have really changed */
-	//SDL_UpdateRect(_mainScreen, 0, 0, 0, 0);
-	if (_mainScreen != _realScreen->getSurface())
-		SDL_BlitSurface(_mainScreen, 0, _realScreen->getSurface(), 0);
 
-	_realScreen->flip();
+}
+
+void FlcPlayer::playHdVideoFrame()
+{
+	// The converted library is zero-based. Count actual FRAME_TYPE packets;
+	// TFTD header frame counts include a non-image entry and are not asset IDs.
+	const int frame = static_cast<int>(_frameCount) - 1;
+	const std::string file = hdPngFrameNumber(frame, 6) + ".png";
+	const HdAssetKey key{HdAssetDomain::Cinematic, _hdFamily, frame};
+	auto &images = _realScreen->getHdCanvasImages();
+	// A movie must not retain thousands of 5120-pixel-wide decoded frames.
+	// The screen owns this cache so the final scene remains available for fading.
+	images.clear();
+	const auto resolved = images.resolve(key, {
+		{HdAssetProvider::Remastered, "Resources/TFTD_HD/Fixed/Cinematics/" + _hdFamily + "/" + file, 16},
+		{HdAssetProvider::Remastered, "Resources/TFTD_HD/Cinematics/" + _hdFamily + "/" + file, 16},
+		{HdAssetProvider::LegacyHd, "Resources/TFTD_HD/LegacyIndexed/Cinematics/" + _hdFamily + "/" + file, 16},
+		{HdAssetProvider::LegacyHd, "Bibliotheque/Cinematiques/" + _hdFamily + "/" + file, 16}});
+	if (!resolved)
+		throw Exception("[HD CINEMATIC ERROR] " + _hdFamily + " frame=" + std::to_string(frame) +
+			" missing or invalid HD resource; native playback reconstruction required");
+	HdCanvas canvas(_realScreen->getSurface()->w, _realScreen->getSurface()->h);
+	canvas.image(resolved, {double(_dx), double(_dy), double(_headerWidth), double(_headerHeight)});
+	_realScreen->presentHdCanvas(canvas);
 }
 
 void FlcPlayer::playAudioFrame(Uint16 sampleRate)

@@ -225,6 +225,8 @@ void Tile::setMapData(MapData *dat, int mapDataID, int mapDataSetID, TilePart pa
 	_objects[part] = dat;
 	_mapData->ID[part] = mapDataID;
 	_mapData->SetID[part] = mapDataSetID;
+	if (_save && (oldMapDataID != mapDataID || oldMapDataSetID != mapDataSetID))
+		_save->markRealHdGeometryChanged();
 	// Record the exact presentation epoch of a genuine terrain identity change.
 	// Initial map/resource linking is deliberately ignored (hadVisual == false),
 	// so loading an existing save does not reset destruction/cooling memories.
@@ -404,6 +406,7 @@ int Tile::openDoor(TilePart part, BattleUnit *unit, BattleActionType reserve, bo
 		if (unit && cost.Time && !cost.haveTU())
 			return 4;
 		_objectsCache[part].currentFrame = 1; // start opening door
+		if (_save) _save->markRealHdGeometryChanged();
 		updateSprite((TilePart)part);
 		return 1;
 	}
@@ -423,6 +426,7 @@ int Tile::closeUfoDoor()
 		if (isUfoDoorOpen((TilePart)part))
 		{
 			_objectsCache[part].currentFrame = 0;
+			if (_save) _save->markRealHdGeometryChanged();
 			retval = 1;
 			updateSprite((TilePart)part);
 		}

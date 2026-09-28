@@ -21,6 +21,7 @@
 #include "../Engine/Game.h"
 #include "../Engine/Options.h"
 #include "../Engine/Screen.h"
+#include "../Engine/Logger.h"
 #include "../Mod/Mod.h"
 #include "../Savegame/SavedGame.h"
 #include "../Savegame/SavedBattleGame.h"
@@ -53,6 +54,17 @@ namespace OpenXcom
  */
 OptionsBaseState::OptionsBaseState(OptionsOrigin origin) : _origin(origin), _group(0)
 {
+	// BATTLE_UI_FAMILY_V1-B: every Options page reached from Battlescape belongs
+	// to the fixed tactical UI family. Rich controls keep their historical CPU
+	// composition on a canonical 640x360 UI canvas; Action/InteractiveSurface
+	// now provide full Physical -> UI coordinates for their internal logic.
+	if (_origin == OPT_BATTLESCAPE)
+	{
+		setUiFamily(UiFamily::Battlescape);
+		setUiFamilyLegacyComposite(true);
+		Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-B][OPTIONS] origin=Battlescape family=Battlescape composite=legacy-canonical";
+	}
+
 	// Create objects
 	_window = new Window(this, 320, 200, 0, 0);
 
@@ -205,6 +217,27 @@ void OptionsBaseState::setCategory(TextButton *button)
 void OptionsBaseState::btnOkClick(Action *)
 {
 	Options::switchDisplay();
+
+	// PRESENTATION SPACES — LOGICAL SCALE APPLY V1
+	// World/UI scale changes alter the logical canvas only. They must not recreate
+	// the physical SDL video mode. Besides being unnecessary work, SDL_SetVideoMode
+	// can perturb window focus / audio devices on some Windows setups. Keep the
+	// historical full reset only when an actual physical-video option changed.
+	const bool physicalVideoChanged =
+		Options::displayWidth != Options::newDisplayWidth ||
+		Options::displayHeight != Options::newDisplayHeight ||
+		Options::useOpenGL != Options::newOpenGL ||
+		Options::useScaleFilter != Options::newScaleFilter ||
+		Options::useHQXFilter != Options::newHQXFilter ||
+		Options::useOpenGLShader != Options::newOpenGLShader ||
+		Options::useXBRZFilter != Options::newXBRZFilter ||
+		Options::rootWindowedMode != Options::newRootWindowedMode ||
+		Options::windowedModePositionX != Options::newWindowedModePositionX ||
+		Options::windowedModePositionY != Options::newWindowedModePositionY ||
+		Options::fullscreen != Options::newFullscreen ||
+		Options::allowResize != Options::newAllowResize ||
+		Options::borderless != Options::newBorderless;
+
 	int dX = Options::baseXResolution;
 	int dY = Options::baseYResolution;
 	Screen::updateScale(Options::battlescapeScale, Options::baseXBattlescape, Options::baseYBattlescape, _origin == OPT_BATTLESCAPE);
@@ -214,7 +247,13 @@ void OptionsBaseState::btnOkClick(Action *)
 	recenter(dX, dY);
 	Options::save();
 	_game->loadLanguages();
-	_game->getScreen()->resetDisplay();
+	Log(LOG_INFO) << "[PRESENTATION-SPACES LOGICAL-SCALE APPLY V1] origin=" << (int)_origin
+		<< " physicalVideoChanged=" << (physicalVideoChanged ? 1 : 0)
+		<< " resetVideo=" << (physicalVideoChanged ? 1 : 0)
+		<< " base=" << Options::baseXResolution << "x" << Options::baseYResolution
+		<< " display=" << Options::displayWidth << "x" << Options::displayHeight
+		<< " world(battle/geo)=" << Options::battlescapeScale << "/" << Options::geoscapeScale;
+	_game->getScreen()->resetDisplay(physicalVideoChanged);
 	SDL_WM_GrabInput(Options::captureMouse);
 	_game->setVolume(Options::soundVolume, Options::musicVolume, Options::uiVolume);
 	if (Options::reload && _origin == OPT_MENU)

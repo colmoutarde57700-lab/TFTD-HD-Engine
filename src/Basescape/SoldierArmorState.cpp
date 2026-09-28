@@ -60,6 +60,16 @@ struct compareArmorName
  */
 SoldierArmorState::SoldierArmorState(Base *base, size_t soldier, SoldierArmorOrigin origin) : _base(base), _soldier(soldier), _origin(origin)
 {
+	// AQUANAUT_UI_FAMILY_V1-B: only the inventory-origin armor picker joins
+	// Aquanaut. The ordinary Geoscape armor picker keeps its historical route.
+	if (_origin == SA_BATTLESCAPE)
+	{
+		setUiFamily(UiFamily::Aquanaut);
+		setPresentationScale(Options::getAquanautUiScale());
+		Log(LOG_INFO) << "[AQUANAUT-UI FAMILY V1-B][ASSIGN] state=SoldierArmorState family=Aquanaut"
+			<< " contentScale=" << Options::getAquanautUiScale();
+	}
+
 	_screen = false;
 
 	// Create objects

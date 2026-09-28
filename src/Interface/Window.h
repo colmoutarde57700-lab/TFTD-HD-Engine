@@ -18,6 +18,7 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "../Engine/Surface.h"
+#include "../Engine/HdUiImage.h"
 
 namespace OpenXcom
 {
@@ -43,6 +44,8 @@ private:
 	static const double POPUP_SPEED;
 	int _dx, _dy;
 	const Surface *_bg;
+	mutable HdUiImageDefinition _hdBackground;
+	std::string _hdBackgroundId;
 	Uint8 _color;
 	WindowPopup _popup;
 	double _popupStep;
@@ -51,6 +54,7 @@ private:
 	bool _contrast, _screen, _thinBorder;
 	Uint8 _innerColor;
 	bool _mute;
+	void composeHdContents(HdCanvas &canvas, HdImageCache &images, const HdUiIndexMap &paletteMap) const;
 public:
 	static Sound *soundPopup[3];
 	/// Creates a new window with the specified size and position.
@@ -58,7 +62,7 @@ public:
 	/// Cleans up the window.
 	~Window();
 	/// Sets the background surface.
-	void setBackground(const Surface *bg);
+	void setBackground(const Surface *bg, const std::string &imageId = {});
 	/// Sets the border color.
 	void setColor(Uint8 color) override;
 	/// Gets the border color.
@@ -71,6 +75,9 @@ public:
 	void popup();
 	/// Draws the window.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
+	void composeHdBackdrop(HdCanvas &canvas, HdImageCache &images,
+		HdRect source, HdRect destination, const HdUiIndexMap &paletteMap) const override;
 	/// sets the X delta.
 	void setDX(int dx);
 	/// sets the Y delta.

@@ -1,41 +1,18 @@
-# Building the Windows x86-64 executable
+# Build P2ZJ on Windows x64
 
-## Reference toolchain
+Reference tools: LLVM-MinGW UCRT 2026-08-26 (Clang 23.1.0), CMake and Ninja. Put CMake and Ninja on PATH. Bundled SDL/media import libraries and runtime DLLs are in deps/lib/x64.
 
-The validated RC lineage was built with:
+From the repository root in PowerShell:
 
-- Base OXCE source: `22f1aae75c3047ceb0c0e24abe74938fa7230793`
-- Target: Windows x86-64 PE32+
-- Toolchain: LLVM-MinGW UCRT 2026-08-26 x86_64
-- Generator: Ninja
-- Build type: Release
-
-The repository includes `toolchain-llvm-mingw-x64.cmake`, which was used by the development lineage. Its `TOOLROOT` contains the original build-machine path; change that one path to the location where the matching LLVM-MinGW toolchain is installed.
-
-## Reference commands
-
-From the repository root:
-
-```sh
-cmake -S . -B build-release \
-  -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE=toolchain-llvm-mingw-x64.cmake
-
-cmake --build build-release -- -j3
+```powershell
+git checkout v0.2.0
+$env:LLVM_MINGW_ROOT = 'C:/Tools/llvm-mingw-20260826-ucrt-x86_64'
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=toolchain-llvm-mingw-x64.cmake -DBUILD_PACKAGE=ON -DDEV_BUILD=ON -DBUILD_HD_CONTRACT_TESTS=ON
+cmake --build build-release --parallel 8
+ctest --test-dir build-release --output-on-failure
+python tests/validate_shaders.py --output build-release/shader-validation
 ```
 
-The historical build notes identify `ninja -j3` as the final build command used in the validated Windows lineage.
+v0.2.0 is the proposed next prerelease tag; until published, use the supplied source snapshot. HLSL validation needs Windows d3dcompiler_47.dll. Resource paths are relative to the source root. Keep copied DLLs beside build-release/bin/openxcom.exe.
 
-## Verified rebuild
-
-On 2026-09-15 this reconstructed source tree was configured and compiled successfully from a clean build directory with the preserved **LLVM-MinGW UCRT 2026-08-26 x86_64** toolchain (Clang 23.1.0). Ninja completed all **413/413** Windows x86-64 Release build/link steps and produced `bin/openxcom.exe`.
-
-The normal repository build uses the bundled SDL import libraries and therefore produces a DLL-based executable. The historical validated executable carrying the `AUTONOME` suffix used statically linked SDL/media dependencies, so the two binaries are not byte-identical even though the OpenXcom application symbol surface matches exactly. See `REBUILD_VERIFICATION.md`.
-
-For a public binary release:
-
-1. tag the exact source state;
-2. build from that tag with the reference toolchain;
-3. smoke-test the resulting executable on Windows with the required runtime DLLs;
-4. attach that tested executable (and DLL package if using the normal dynamic build) to the GitHub Release for the same tag.
+real_hd_pixel_firewall is required on each engine build. BUILD_HD_CONTRACT_TESTS enables the delivered P2ZJ storey/caustic regression without game data or private art. Build metadata records the exact source commit and hashes. Bit-for-bit identity across tool versions, directories or Git metadata, or with the historical private executable, is not promised.

@@ -1,3 +1,5 @@
+#include "../Engine/HdUiPicture.h"
+#include "../Engine/Options.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -20,6 +22,7 @@
 #include "MedikitView.h"
 #include "../Engine/InteractiveSurface.h"
 #include "../Engine/Game.h"
+#include "../Engine/Logger.h"
 #include "../Engine/Action.h"
 #include "../Engine/Palette.h"
 #include "../Interface/Text.h"
@@ -120,12 +123,13 @@ MedikitButton::MedikitButton(int y) : InteractiveSurface(30, 20, 190, y)
  */
 MedikitState::MedikitState (BattleUnit *targetUnit, BattleAction *action, TileEngine *tile) : _targetUnit(targetUnit), _action(action), _tileEngine(tile)
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Options::baseXResolution = Screen::ORIGINAL_WIDTH;
-		Options::baseYResolution = Screen::ORIGINAL_HEIGHT;
-		_game->getScreen()->resetDisplay(false);
-	}
+	// BATTLE_UI_FAMILY_V1-C1: Medikit is a tactical UI overlay. Its rich
+	// MedikitView uses Action relative mouse coordinates, now provided by the
+	// V1-B family input contract. Keep the historical composition intact on
+	// the canonical Battlescape UI canvas without touching World resolution.
+	setUiFamily(UiFamily::Battlescape);
+	setUiFamilyLegacyComposite(true);
+	Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-C1][ASSIGN] state=MedikitState family=Battlescape composite=legacy-canonical";
 
 	_item = action->weapon;
 	_bg = new Surface(320, 200);
@@ -133,7 +137,9 @@ MedikitState::MedikitState (BattleUnit *targetUnit, BattleAction *action, TileEn
 	// Set palette
 	_game->getSavedGame()->getSavedBattle()->setPaletteByDepth(this);
 
-	if (_game->getScreen()->getDY() > 50)
+	int uiW = 0, uiH = 0;
+	getUiFamilyLogicalSize(uiW, uiH);
+	if ((uiH - Screen::ORIGINAL_HEIGHT) / 2 > 50)
 	{
 		_screen = false;
 		_bg->drawRect(67, 44, 190, 100, Palette::blockOffset(15)+15);
@@ -176,6 +182,7 @@ MedikitState::MedikitState (BattleUnit *targetUnit, BattleAction *action, TileEn
 	}
 
 	backgroundSprite->blitNShade(_bg, 0, 0);
+	if (Options::hdGraphics) _bg->setHdPicture(backgroundSprite->getHdPicture());
 	_pkText->setBig();
 	_stimulantTxt->setBig();
 	_healTxt->setBig();
@@ -211,11 +218,7 @@ void MedikitState::handle(Action *action)
  */
 void MedikitState::onEndClick(Action *)
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Screen::updateScale(Options::battlescapeScale, Options::baseXBattlescape, Options::baseYBattlescape, true);
-		_game->getScreen()->resetDisplay(false);
-	}
+	// No shared resolution was changed by this family-owned overlay.
 	_game->popState();
 	_tileEngine->medikitRemoveIfEmpty(_action);
 }

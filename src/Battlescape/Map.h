@@ -21,12 +21,17 @@
 #include "../Engine/Options.h"
 #include "../Engine/Collections.h"
 #include "../Engine/HdImage.h"
+#include "RemasterWorldState.h"
 #include "../Engine/HdColorTransform.h"
+#include "../Engine/HdMaterialGrade.h"
+#include "../Engine/HdGpuBackend.h"
 #include "../Mod/MapData.h"
 #include "Position.h"
 #include "Particle.h"
 #include <vector>
+#include <array>
 #include <map>
+#include <set>
 #include <cstdint>
 
 namespace OpenXcom
@@ -116,6 +121,8 @@ private:
 	BattlescapeMessage *_message;
 	Camera *_camera;
 	int _visibleMapHeight;
+	// Optional world-logical viewport height ending at the independently presented HUD top.
+	int _hudVisibleMapHeightOverride;
 	std::vector<Position> _waypoints;
 	bool _unitDying, _smoothCamera, _smoothingEngaged, _flashScreen;
 	int _bgColor;
@@ -123,36 +130,142 @@ private:
 	Text *_txtAccuracy;
 	SurfaceSet *_projectileSet;
 
-	// HD renderer compatibility layer. Legacy drawing stays 8-bit internally,
-	// while true-colour replacements are composited after the map using the
-	// exact draw-order recorded for every legacy sprite.
+	// Real HD world submission layer. OXCE supplies semantic state and 2D
+	// compatibility sprites, while D3D11 owns physical composition. The Legacy
+	// raster/order buffer is retained only for CPU fallback pixels that have not
+	// yet migrated to a Real HD semantic/geometry provider.
+    unsigned long long _hdRoofGeometryRevision = ~0ull;
+    std::map<int,std::array<unsigned,16>> _hdRoofSunCache;
 	struct HdDrawCommand
 	{
+        bool roofCaustic = false;
+        std::array<unsigned,16> roofSunRows{};
+		bool surfaceCursor = false;
+		bool surfaceCursorFront = false;
+		bool surfaceCursorGuide = false;
+		bool unit3DKeepLayer = false;
+		std::vector<Uint8> generatedRgba;
+		Position cursorTile;
+		bool cursorYellow = false;
+        // Optional real-geometry replacement of this complete PNG unit group.
+        std::string unit3DModel;
+        HdUnit3DPose unit3DPose;
+        size_t unit3DCommandCount = 0;
+        int unit3DX = 0, unit3DY = 0;
+        GraphSubset unit3DMask;
 		std::string assetPath;
+		// WORLD_GPU_V1: a Legacy indexed frame can use the exact same map command
+		// stream as an authored HD asset. The source remains Legacy; only rasterization
+		// moves from Surface::blitRaw to D3D11.
+		bool legacyRaw = false;
+		std::string legacyKey;
+		const Uint8 *legacyIndices = nullptr;
+		unsigned legacyWidth = 0;
+		unsigned legacyHeight = 0;
+		unsigned legacyPitch = 0;
+		int legacyBaseColor = 0;
 		int nativeScale = 0;
 		std::string colorMode = "auto";
-		HdEnvironmentProfile environmentProfile = HdEnvironmentProfile::Global;
+		HdMaterialProfile materialProfile = HdMaterialProfile::Auto;
 		int offsetX = 0;
 		int offsetY = 0;
 		int x = 0;
 		int y = 0;
+		// Static REAL HD scene positions are projected from world space with a
+		// zero camera offset. The view translation is applied at submission.
+		bool worldAnchored = false;
+		int worldZ = 0;
+		int worldX = 0, worldY = 0;
+		int worldLayer = 0;
+		bool worldDynamic = false;
 		int shade = 0;
+		// Presentation-only colour response of the physical REAL HD helmet light.
+		// 1,1,1 is neutral; it never changes gameplay detection.
+		float lightTintR = 1.0f;
+		float lightTintG = 1.0f;
+		float lightTintB = 1.0f;
 		bool rightHalfOnly = false;
 		unsigned drawOrder = 0;
 		GraphSubset clipMask;
 		bool hasClipMask = false;
+		// V3: replay player UI / independently-discovered boundary walls after
+		// the final black visibility mask.
+		bool postVisibility = false;
 	};
+    struct Unit3DAnimationState { bool kneeling; Uint32 changed; };
+    std::map<int, Unit3DAnimationState> _unit3DStates;
+    std::set<std::string> _unit3DReports;
+    bool _unit3DGpuFailed = false;
 	HdImageCache _hdImageCache;
 	HdEnvironmentTransform _hdEnvironmentTransform;
+	// BEDROCK impact fields. Blast RGB stays separate from weapon triplet RGB so the shader can
+	// read authored weapon CORE/RIM/HALO masks directly instead of inferring them from one legacy mask.
+	std::vector<unsigned char> _hdBedrockCraterField;
+	unsigned _hdBedrockCraterFieldW;
+	unsigned _hdBedrockCraterFieldH;
+	unsigned long long _hdBedrockCraterFieldSourceRevision;
+	unsigned long long _hdBedrockCraterFieldUploadRevision;
+	std::vector<unsigned char> _hdBedrockWeaponField;
+	unsigned _hdBedrockWeaponFieldW;
+	unsigned _hdBedrockWeaponFieldH;
+	unsigned long long _hdBedrockWeaponFieldUploadRevision;
+
+	// RESOURCE_RESOLVER_CACHE_V1: resolution from OXCE semantic resources to
+	// authored HD overrides is stable for the lifetime of a tactical Map.  The
+	// old path rebuilt candidate strings, queried the VFS and rescanned every
+	// HdVisual rule for every visible tile on every redraw.  Cache both positive
+	// and negative answers; gameplay/animation still selects the frame first.
+	mutable std::map<std::string, std::string> _hdTerrainAssetResolveCache;
+	mutable std::map<std::string, const HdVisualRule*> _hdTerrainRuleResolveCache;
+	mutable std::map<std::string, std::string> _hdSurfaceSetAssetResolveCache;
+	mutable std::map<std::string, const HdVisualRule*> _hdSurfaceSetRuleResolveCache;
+
+	RemasterWorldState _remasterWorldState;
+	RemasterStaticScene _remasterStaticScene;
+	bool _hdStaticSceneCommandsReady = false;
+	size_t _hdStaticCommandCount = 0;
+	bool _hdProducingDynamic = false;
+	unsigned long long _remasterWorldStateBuiltRevision;
 	std::vector<HdDrawCommand> _hdDrawCommands;
+	struct HdSurfaceCursorQuad
+	{
+		Position tile;
+		std::array<float, 8> xy{}; // top, right, bottom, left in logical map space
+		std::array<float, 4> depth{};
+	};
+	std::vector<HdSurfaceCursorQuad> _hdSurfaceCursorQuads;
+	// All physical ground quads, including ground outside mission knowledge.
+	// The HD fog mask clips this layer; cursor and gameplay keep their own gates.
+	std::vector<HdSurfaceCursorQuad> _hdFogSurfaceQuads;
 	std::vector<unsigned> _drawOrderBuffer;
 	unsigned _drawSequence;
+	unsigned _hdLegacyBridgeRanges;
+	unsigned _hdLegacyGpuCompatCommands;
 	Uint32 _hdLastRealTick;
 	// RC11 TEST6 physical framebuffer cache.  The logical Map already owns an
 	// invalidation flag; this revision mirrors successful Map::draw() calls so
 	// the expensive RGBA pass can reuse an already composed physical viewport.
 	unsigned long long _hdPhysicalRevision;
+	// BEDROCK terrain vertices contain projected geometry and sampled presentation
+	// light. They stay valid while the logical map revision and view level match.
+	std::vector<HdGpuBedrockVertex> _hdBedrockGeometry;
+	unsigned long long _hdBedrockGeometryRevision = ~0ULL;
+	unsigned long long _hdBedrockGeometryGpuRevision = 0;
+	int _hdBedrockGeometryViewLevel = -1;
+	int _hdBedrockGeometryMapW = 0;
+	int _hdBedrockGeometryMapH = 0;
 	unsigned long long _hdPhysicalCachedRevision;
+	// REAL HD LIGHTING V2: cached presentation-only directional helmet field.
+	// OXCE LL_UNITS remains untouched for gameplay compatibility, but is no
+	// longer consumed as the graphical personal-light authority.
+	std::vector<float> _realHdHelmetLightField;
+	std::vector<float> _realHdHelmetLightFieldR;
+	std::vector<float> _realHdHelmetLightFieldG;
+	std::vector<float> _realHdHelmetLightFieldB;
+	// PERF FOUNDATION V1: lighting invalidation is independent from physical
+	// presentation redraws. Camera/selector/resize must not rebuild LOS lighting.
+	unsigned long long _realHdLightingRevision = 0;
+	unsigned long long _realHdHelmetLightFieldRevision = ~0ULL;
 	struct HdPhysicalFrameCacheEntry
 	{
 		Surface::UniqueBufferPtr buffer;
@@ -170,6 +283,11 @@ private:
 	Uint32 _hdPhysicalLastMs;
 	unsigned long long _hdPhysicalPixelsTested, _hdPhysicalPixelsWritten;
 	bool _hdPhysicalLastCacheHit;
+	// The Legacy Map can temporarily become a full replacement screen during
+	// hidden movement/end-turn processing.  Keep that presentation fact explicit
+	// so the later physical HD pass cannot redraw BEDROCK or cached RGBA sprites
+	// over the replacement message.
+	bool _hdPhysicalMapSuppressed;
 
 	// TEST8-F redraw tracer. Diagnostic only.
 	uint64_t _hdRedrawCount[HDR_COUNT];
@@ -188,6 +306,7 @@ private:
 	std::string findHdUnitOverlayAsset(const BattleUnit *unit, const std::string &layer, const std::string &hand, const BattleItem *item) const;
 	std::string findHdTerrainAsset(const Tile *tile, TilePart part) const;
 	std::string findHdSurfaceSetAsset(const std::string &setName, int frame) const;
+	std::set<std::string> _hdPngLayerFallbacks;
 	const HdVisualRule *findHdTerrainVisualRule(const Tile *tile, TilePart part) const;
 	const HdVisualRule *findHdSurfaceSetVisualRule(const std::string &setName, int frame) const;
 	bool queueHdVisualRule(const HdVisualRule &rule, const std::string &instanceKey, int x, int y, int shade, bool rightHalfOnly, unsigned order, const GraphSubset *clipMask = nullptr, long long epochTimeMs = -1, int epochTurn = -1);
@@ -199,8 +318,28 @@ private:
 	std::vector<Uint8> snapshotArea(const GraphSubset &area) const;
 	void trackedBlitRaw(SurfaceRaw<Uint8> destination, SurfaceRaw<const Uint8> source, int x, int y, int shade = 0, bool rightHalfOnly = false, int newBaseColor = 0);
 	void trackedBlitNShade(const Surface *source, SurfaceRaw<Uint8> destination, int x, int y, int shade = 0, bool half = false, int newBaseColor = 0);
-	void drawHdSurfaceSetOrLegacy(SurfaceRaw<Uint8> destination, const std::string &setName, int frame, SurfaceRaw<const Uint8> legacy, int x, int y, int shade = 0, bool rightHalfOnly = false, int newBaseColor = 0);
-	void queueHdAsset(const std::string &assetPath, int nativeScale, int offsetX, int offsetY, int x, int y, int shade, bool rightHalfOnly, unsigned order, const GraphSubset *clipMask = nullptr, const std::string &colorMode = "auto");
+	void drawHdSurfaceSetOrLegacy(SurfaceRaw<Uint8> destination, const std::string &setName, int frame, SurfaceRaw<const Uint8> legacy, int x, int y, int shade = 0, bool rightHalfOnly = false, int newBaseColor = 0, bool postVisibility = false);
+	void queueHdAsset(const std::string &assetPath, int nativeScale, int offsetX, int offsetY, int x, int y, int shade, bool rightHalfOnly, unsigned order, const GraphSubset *clipMask = nullptr, const std::string &colorMode = "auto", const std::string &materialProfile = "");
+	void rebuildRemasterWorldState();
+	void rebuildHdStaticSceneCommands();
+	void appendHdDynamicUnitCommands();
+	void appendHdCursorCommand();
+	void appendHdCombatEffectsCommands();
+	void appendHdTacticalIndicators();
+	void updateHdCursorInfo();
+	void updateHdProjectileCamera();
+	struct HdTacticalNumber { int value, x, y, color; };
+	std::vector<HdTacticalNumber> _hdTacticalNumbers;
+	std::vector<Tile*> _hdPresentationTiles;
+	bool _hdCursorInfoVisible = false;
+	bool _hdExplosionFlash = false;
+	struct HdSedimentBurst { Position voxel; Uint32 started; int diameter; int turn; bool observed; };
+	std::vector<HdSedimentBurst> _hdSedimentBursts;
+	size_t _hdObservedCraterCount = 0;
+	bool _hdCraterEventsInitialized = false;
+	void queueHdSemanticFrame(const std::string &family, int frame, const Position &world, int x, int y, int shade = 0, int color = 0, bool overlay = false);
+	void queueLegacyIndexedAsset(SurfaceRaw<const Uint8> source, int x, int y, int shade, bool rightHalfOnly, unsigned order, int newBaseColor = 0, const GraphSubset *clipMask = nullptr);
+	bool queueLegacyIfGpuReady(SurfaceRaw<const Uint8> source, int x, int y, int shade, bool rightHalfOnly, unsigned order, int newBaseColor = 0, const GraphSubset *clipMask = nullptr, const Tile *visibilityTile = nullptr, TilePart visibilityPart = O_FLOOR);
 
 	void drawUnit(UnitSprite &unitSprite, Tile *unitTile, Tile *currTile, Position tileScreenPosition, bool topLayer, BattleUnit* movingUnit = nullptr);
 	void drawTerrain(Surface *surface);
@@ -218,6 +357,10 @@ public:
 	~Map();
 	/// Initializes the map.
 	void init();
+	/// Pre-decodes the HD resources belonging to the current tactical mission.
+	void prewarmHdMissionResources();
+	/// Reload authored HD assets from their current VFS files, including same-path replacements.
+	void reloadHdResources();
 	/// Handles timers.
 	void think() override;
 	/// Draws the surface.
@@ -231,10 +374,13 @@ public:
 	unsigned long long getHdPhysicalPixelsTested() const { return _hdPhysicalPixelsTested; }
 	unsigned long long getHdPhysicalPixelsWritten() const { return _hdPhysicalPixelsWritten; }
 	bool getHdPhysicalLastCacheHit() const { return _hdPhysicalLastCacheHit; }
+	std::string getRemasterWorldTrace();
 	unsigned getHdPhysicalCommandCount() const { return (unsigned)_hdDrawCommands.size(); }
 	void invalidateHd(HdRedrawReason reason);
 	void invalidate(bool valid = true);
 	std::string getHdRedrawTrace() const;
+	/// Debug-only REAL HD FOV probe: compares source discovery with voxel targetability per Z/TilePart.
+	std::string getHdFovAuditTrace() const;
 	void refreshAIProgress(int progress);
 	/// Sets the palette.
 	void setPalette(const SDL_Color *colors, int firstcolor = 0, int ncolors = 256) override;
@@ -299,6 +445,9 @@ public:
 	void refreshSelectorPosition();
 	/// Expands/collapses the usable tactical viewport when the HUD is hidden/shown.
 	void setHudHidden(bool hidden);
+	/// Reserves a world-logical viewport height for the independent UI-space HUD.
+	void setHudVisibleMapHeightOverride(int height);
+	int getVisibleMapHeight() const { return _visibleMapHeight; }
 	/// Special handling for updating map height.
 	void setHeight(int height) override;
 	/// Special handling for updating map width.
@@ -318,6 +467,13 @@ public:
 	/// Check if the screen is flashing this.
 	bool getBlastFlash() const;
 	/// Modify shade for fading
+	void rebuildRealHdHelmetLightField();
+	float realHdHelmetLightAt(const Position &position);
+	void realHdHelmetLightColorAt(const Position &position, float &r, float &g, float &b);
+	float realHdLightingAt(Tile *tile);
+	void realHdLightingTintAt(const Tile *tile, float &r, float &g, float &b);
+	void applyRealHdLightingTintToCommands(size_t begin, const Tile *tile);
+	int realHdShade(Tile *tile);
 	int reShade(Tile *tile);
 	/// toggle the night-vision mode
 	void enableNightVision();

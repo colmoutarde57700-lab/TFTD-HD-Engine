@@ -331,6 +331,8 @@ void Camera::scrollKey()
  */
 void Camera::scrollXY(int x, int y, bool redraw)
 {
+	if (x == 0 && y == 0) return;
+	const Position previousOffset = _mapOffset;
 	_mapOffset.x += x;
 	_mapOffset.y += y;
 
@@ -353,8 +355,13 @@ void Camera::scrollXY(int x, int y, bool redraw)
 	}
 	while (true);
 
-	_map->refreshSelectorPosition();
-	if (redraw) _map->invalidateHd(Map::HDR_CAMERA);
+	// A scroll against a map boundary can be fully cancelled by the clamp above.
+	// In that case the view did not change and a full tactical redraw is wasteful.
+	if (_mapOffset.x != previousOffset.x || _mapOffset.y != previousOffset.y)
+	{
+		_map->refreshSelectorPosition();
+		if (redraw) _map->invalidateHd(Map::HDR_CAMERA);
+	}
 }
 
 

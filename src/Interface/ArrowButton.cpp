@@ -20,6 +20,7 @@
 #include "TextList.h"
 #include "../Engine/Timer.h"
 #include "../Engine/Action.h"
+#include "../Engine/HdCanvas.h"
 
 namespace OpenXcom
 {
@@ -91,6 +92,54 @@ void ArrowButton::setTextList(TextList *list)
 /**
  * Draws the button with the specified arrow shape.
  */
+void ArrowButton::composeHd(HdCanvas &canvas, HdImageCache &)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas button(getWidth(), getHeight());
+	const bool pressed = _group ? (*_group == this) : _inverted;
+	const auto rect = [&](double x, double y, double w, double h, int color)
+	{
+		Uint8 index = static_cast<Uint8>(color);
+		if (pressed && index) index = static_cast<Uint8>(2 * (_color + 3) - index);
+		button.sourceRectangle({x, y, std::max(0.0, w), std::max(0.0, h)}, getHdColor(index));
+	};
+	rect(0, 0, getWidth() - 1, getHeight() - 1, _color + 2);
+	rect(1, 1, getWidth() - 1, getHeight() - 1, _color + 5);
+	rect(1, 1, getWidth() - 2, getHeight() - 2, _color + 4);
+	rect(0, 0, 1, 1, _color + 1);
+	rect(0, getHeight() - 1, 1, 1, _color + 4);
+	rect(getWidth() - 1, 0, 1, 1, _color + 4);
+	const int color = _color + 1;
+	const auto vertical = [&](int x, int y, int width, int step, int shade)
+	{
+		for (; width >= 1; width -= 2, ++x, y += step)
+			rect(x, y, width, 1, shade);
+	};
+	const auto horizontal = [&](int x, int y, int step, int shade)
+	{
+		for (int height = 1; height <= 3; height += 2, x += step, --y)
+			rect(x, y, 2, height, shade);
+		rect(x + (step < 0 ? 1 : 0), y, 1, 5, shade);
+	};
+	switch (_shape)
+	{
+	case ARROW_BIG_UP:
+		rect(5, 8, 3, 3, color); vertical(2, 7, 9, -1, color); break;
+	case ARROW_BIG_DOWN:
+		rect(5, 3, 3, 3, color); vertical(2, 6, 9, 1, color); break;
+	case ARROW_SMALL_UP:
+		vertical(1, 5, 9, -1, color + 2); vertical(2, 5, 7, -1, color); break;
+	case ARROW_SMALL_DOWN:
+		vertical(1, 2, 9, 1, color + 2); vertical(2, 2, 7, 1, color); break;
+	case ARROW_SMALL_LEFT:
+		horizontal(2, 4, 2, color + 2); horizontal(3, 4, 2, color); break;
+	case ARROW_SMALL_RIGHT:
+		horizontal(7, 4, -2, color + 2); horizontal(6, 4, -2, color); break;
+	default: break;
+	}
+	composeHdLayer(canvas, button);
+}
+
 void ArrowButton::draw()
 {
 	ImageButton::draw();

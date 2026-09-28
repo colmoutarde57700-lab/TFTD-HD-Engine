@@ -17,6 +17,9 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "Bar.h"
+#include "../Engine/HdCanvas.h"
+#include <algorithm>
+#include <cmath>
 #include <SDL.h>
 
 namespace OpenXcom
@@ -168,6 +171,30 @@ void Bar::setSecondValueOnTop(bool onTop)
  * Draws the bordered bar filled according
  * to its values.
  */
+void Bar::composeHd(HdCanvas &canvas, HdImageCache &)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas bar(getWidth(), getHeight());
+	const double width = std::max(0.0, std::floor(double(_scale) * _max)) + 1.0;
+	const double height = getHeight();
+	const auto border = getHdColor(_borderColor ? _borderColor : _color + 4);
+	bar.rectangle({0, 0, width, 1}, border);
+	bar.rectangle({0, std::max(0.0, height - 1), width, 1}, border);
+	const double first = std::max(0.0, std::floor(double(_scale) * _value));
+	const double second = std::max(0.0, std::floor(double(_scale) * _value2));
+	if (std::max(first, second) <= width - 1)
+		bar.rectangle({width - 1, 1, 1, std::max(0.0, height - 2)}, border);
+	const double lower = _secondOnTop ? first : second;
+	const double upper = _secondOnTop ? second : first;
+	const auto lowerColor = getHdColor(_secondOnTop ? _color : _color2);
+	const auto upperColor = getHdColor(_secondOnTop ? _color2 : _color);
+	// Emit only the final intervals. This preserves transparent top colours
+	// without clearing pixels in another widget or an older framebuffer.
+	bar.rectangle({upper, 1, std::max(0.0, lower - upper), std::max(0.0, height - 2)}, lowerColor);
+	bar.rectangle({0, 1, upper, std::max(0.0, height - 2)}, upperColor);
+	composeHdLayer(canvas, bar);
+}
+
 void Bar::draw()
 {
 	Surface::draw();

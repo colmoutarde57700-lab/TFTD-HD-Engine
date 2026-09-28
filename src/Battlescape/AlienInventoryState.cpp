@@ -1,3 +1,4 @@
+#include "../Engine/HdUiPicture.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -46,12 +47,12 @@ namespace OpenXcom
  */
 AlienInventoryState::AlienInventoryState(BattleUnit *unit)
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Options::baseXResolution = Screen::ORIGINAL_WIDTH;
-		Options::baseYResolution = Screen::ORIGINAL_HEIGHT;
-		_game->getScreen()->resetDisplay(false);
-	}
+	// AQUANAUT_UI_FAMILY_V1: Alien inventory uses the same canonical 320x200
+	// Aquanaut space and independent content scale as human InventoryState.
+	setUiFamily(UiFamily::Aquanaut);
+	setPresentationScale(Options::getAquanautUiScale());
+	Log(LOG_INFO) << "[AQUANAUT-UI FAMILY V1][ASSIGN] state=AlienInventoryState family=Aquanaut"
+		<< " contentScale=" << Options::getAquanautUiScale();
 
 	// Create objects
 	_bg = new Surface(320, 200, 0, 0);
@@ -87,6 +88,7 @@ AlienInventoryState::AlienInventoryState(BattleUnit *unit)
 	if (tmp)
 	{
 		tmp->blitNShade(_bg, 0, 0);
+		if (Options::hdGraphics) _bg->setHdPicture(tmp->getHdPicture());
 	}
 
 	_txtName->setBig();
@@ -149,6 +151,7 @@ AlienInventoryState::AlienInventoryState(BattleUnit *unit)
 	_btnArmor->onMouseClick((ActionHandler)&AlienInventoryState::btnArmorClickMiddle, SDL_BUTTON_MIDDLE);
 
 	_soldier->clear();
+	HdUiPicture portrait(_soldier->getWidth(), _soldier->getHeight());
 
 	Soldier *s = unit->getGeoscapeSoldier();
 	if (s)
@@ -159,6 +162,7 @@ AlienInventoryState::AlienInventoryState(BattleUnit *unit)
 			{
 				auto* surf = _game->getMod()->getSurface(layer, true);
 				surf->blitNShade(_soldier->getSurface(), 0, 0);
+			if (Options::hdGraphics) portrait.composite(surf->getHdPicture());
 			}
 		}
 		else
@@ -198,6 +202,7 @@ AlienInventoryState::AlienInventoryState(BattleUnit *unit)
 			if (surf)
 			{
 				surf->blitNShade(_soldier, 0, 0);
+			if (Options::hdGraphics) portrait.composite(surf->getHdPicture());
 			}
 			else
 			{
@@ -220,6 +225,7 @@ AlienInventoryState::AlienInventoryState(BattleUnit *unit)
 		if (armorSurface)
 		{
 			armorSurface->blitNShade(_soldier, 0, 0);
+			if (Options::hdGraphics) portrait.composite(armorSurface->getHdPicture());
 		}
 	}
 
@@ -231,6 +237,7 @@ AlienInventoryState::AlienInventoryState(BattleUnit *unit)
 	if (tmp && unit->getFatalWounds() > 0 && unit->indicatorsAreEnabled())
 	{
 		tmp->blitNShade(_soldier, 32, 32);
+		if (Options::hdGraphics) portrait.composite(tmp->getHdPicture(), {32,32,1,1});
 
 		const Element* element = _game->getMod()->getInterface("inventory")->getElementOptional("textName");
 		if (element && element->custom == 0)
@@ -254,7 +261,10 @@ AlienInventoryState::AlienInventoryState(BattleUnit *unit)
 	if (tmp && unit->getFire() > 0 && unit->indicatorsAreEnabled())
 	{
 		tmp->blitNShade(_soldier, 112, 32);
+		if (Options::hdGraphics) portrait.composite(tmp->getHdPicture(), {112,32,1,1});
 	}
+
+	if (Options::hdGraphics) _soldier->setHdPicture(portrait);
 
 	// --------------------- DEBUG INDICATORS ---------------------
 	if (!Options::debug)
@@ -318,11 +328,7 @@ AlienInventoryState::AlienInventoryState(BattleUnit *unit)
  */
 AlienInventoryState::~AlienInventoryState()
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Screen::updateScale(Options::battlescapeScale, Options::baseXBattlescape, Options::baseYBattlescape, true);
-		_game->getScreen()->resetDisplay(false);
-	}
+	// AQUANAUT_UI_FAMILY_V1: no World/display restoration.
 }
 
 void AlienInventoryState::calculateMeleeWeapon(BattleUnit* unit, BattleItem* weapon, Text* label)

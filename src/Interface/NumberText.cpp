@@ -17,6 +17,7 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "NumberText.h"
+#include "../Engine/HdFont.h"
 #include <sstream>
 #include <string>
 
@@ -270,6 +271,29 @@ void NumberText::setPalette(const SDL_Color *colors, int firstcolor, int ncolors
 /**
  * Draws all the digits in the number.
  */
+void NumberText::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	if (!_hdDigits)
+	{
+		_hdDigits = std::make_unique<HdFontFace>("NumberText", 3, 5, 1, true);
+		_hdBorderedDigits = std::make_unique<HdFontFace>("NumberTextBordered", 5, 7, -1, true);
+		for (int i = 0; i < 10; ++i)
+		{
+			_hdDigits->define('0' + i, i);
+			_hdBorderedDigits->define('0' + i, i);
+		}
+	}
+	HdCanvas contents(getWidth(), getHeight());
+	HdTextColor style;
+	style.offset = _color;
+	for (size_t i = 0; i < style.palette.size(); ++i) style.palette[i] = getHdColor(static_cast<Uint8>(i));
+	HdFontFace &font = *(_bordered ? _hdBorderedDigits : _hdDigits);
+	double x = 0;
+	for (const char digit : std::to_string(_value)) x += font.append(contents, images, digit, x, 0, style);
+	composeHdLayer(canvas, contents);
+}
+
 void NumberText::draw()
 {
 	Surface::draw();

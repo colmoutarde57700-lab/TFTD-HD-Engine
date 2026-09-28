@@ -48,6 +48,7 @@ public:
 	int getValue() const;
 	/// Draws the progress bar.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 };
 
 }

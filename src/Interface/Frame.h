@@ -51,6 +51,7 @@ public:
 	void setThickness(int thickness);
 	/// Draws the frame.
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 };
 
 }

@@ -27,6 +27,7 @@
 #include "../Engine/Action.h"
 #include "../Engine/Options.h"
 #include "../Engine/Screen.h"
+#include "../Engine/HdUiImage.h"
 
 namespace OpenXcom
 {
@@ -100,6 +101,28 @@ void ComboBox::setDisplayScale(int scale, int anchorX, int anchorY)
 	_arrow->setDisplayScale(scale, anchorX, anchorY);
 	_window->setDisplayScale(scale, anchorX, anchorY);
 	_list->setDisplayScale(scale, anchorX, anchorY);
+}
+
+void ComboBox::setPresentationInputTransform(int logicalX, int logicalY, int logicalW, int logicalH,
+	int physicalX, int physicalY, double scaleX, double scaleY)
+{
+	InteractiveSurface::setPresentationInputTransform(logicalX, logicalY, logicalW, logicalH,
+		physicalX, physicalY, scaleX, scaleY);
+	// ComboBox owns interactive children that are not registered in State::_surfaces.
+	// They nevertheless live in the same canonical UI coordinate system and must
+	// receive the same Physical -> UI transform or the dropdown would remain in
+	// World Space while the parent is already fixed.
+	_button->setPresentationInputTransform(_button->getX(), _button->getY(), _button->getWidth(), _button->getHeight(),
+		physicalX, physicalY, scaleX, scaleY);
+	_list->setPresentationInputTransform(_list->getX(), _list->getY(), _list->getWidth(), _list->getHeight(),
+		physicalX, physicalY, scaleX, scaleY);
+}
+
+void ComboBox::clearPresentationInputTransform()
+{
+	InteractiveSurface::clearPresentationInputTransform();
+	_button->clearPresentationInputTransform();
+	_list->clearPresentationInputTransform();
 }
 
 /**
@@ -307,8 +330,23 @@ void ComboBox::setDropdown(int options)
 {
 	int items = std::min(options, MAX_ITEMS);
 	int h = _button->getFont()->getHeight() + _button->getFont()->getSpacing();
-	int dy = (Options::baseYResolution - 200) / 2;
-	while (_window->getY() + items * h + VERTICAL_MARGIN * 2 > 200 + dy)
+
+	// BATTLE_UI_FAMILY_V1-B_R2: dropdown geometry belongs to the same logical
+	// presentation space as its owning State.  Using Options::baseYResolution
+	// here couples rich UI widgets back to the current World canvas (x1/x6 etc).
+	// At x6 this could make the available bottom edge smaller than even an empty
+	// dropdown, decrementing `items` below zero until Surface::setHeight() tried
+	// to allocate an invalid/huge surface.  Query the canonical UiFamily canvas
+	// instead, and never allow the fit loop to run below one real item.
+	int layoutHeight = Options::baseYResolution;
+	if (_state && _state->getUiFamily() != UiFamily::Legacy)
+	{
+		int layoutWidth = 0;
+		_state->getUiFamilyLogicalSize(layoutWidth, layoutHeight);
+	}
+	int dy = (layoutHeight - Screen::ORIGINAL_HEIGHT) / 2;
+	const int bottom = Screen::ORIGINAL_HEIGHT + dy;
+	while (items > 1 && _window->getY() + items * h + VERTICAL_MARGIN * 2 > bottom)
 	{
 		items--;
 	}
@@ -344,6 +382,24 @@ void ComboBox::setOptions(const std::vector<std::string> &options, bool translat
  * Blits the combo box components.
  * @param surface Pointer to surface to blit onto.
  */
+void ComboBox::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	_button->composeHd(canvas, images);
+	if (_arrow->isDisplayVisible())
+	{
+		HdCanvas arrow(11, 8);
+		auto palette = std::make_shared<std::array<HdRgba, 256>>();
+		const int base = _color == 255 ? 256 : _color;
+		for (size_t i = 0; i < palette->size(); ++i) (*palette)[i] = getHdColor(static_cast<Uint8>(base + i));
+		(*palette)[0].a = 0;
+		hdAppendUiImage(arrow, images, hdUiWidgetDefinition("ComboArrow", 11, 8), arrow.bounds(), arrow.bounds(), palette);
+		_arrow->composeHdLayer(canvas, arrow);
+	}
+	_window->composeHd(canvas, images);
+	_list->composeHd(canvas, images);
+}
+
 void ComboBox::blit(SDL_Surface *surface)
 {
 	Surface::blit(surface);

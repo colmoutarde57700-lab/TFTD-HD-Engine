@@ -19,6 +19,7 @@
  */
 #include <vector>
 #include "Position.h"
+#include "RealHdPhysicalGeometry.h"
 #include "BattlescapeGame.h"
 #include "../Mod/RuleItem.h"
 #include "../Mod/MapData.h"
@@ -103,6 +104,10 @@ private:
 	};
 
 	SavedBattleGame *_save;
+	RealHdPhysicalGeometry _realHdScene;
+	unsigned long long _realHdSceneRevision = ~0ull;
+	bool realHdFovActive() const;
+	bool ensureRealHdScene();
 	const std::vector<Uint16> *_voxelData;
 
 	/// Cache for tile visibility and light propagation.
@@ -111,6 +116,11 @@ private:
 	std::vector<Uint32> _lightPropagationTerrainBlocking;
 	/// Cache for marking tiles that need light updated.
 	std::vector<Uint32> _lightPropagationTempNeedUpdate;
+	// A position event can recalculate many observers. Publish the resulting
+	// player-facing contact flags once after all observer lists are current.
+	unsigned _playerDetectionBatchDepth = 0;
+	bool _playerDetectionDirty = false;
+	void refreshPlayerDetection();
 
 	const RuleInventory *_inventorySlotGround;
 	constexpr static int heightFromCenter[11] = {0,-2,+2,-4,+4,-6,+6,-8,+8,-12,+12};
@@ -174,6 +184,8 @@ public:
 	int getMaxVoxelViewDistance() const { return _maxVoxelViewDistance; }
 	/// Get threshold of darkness for LoS calculation.
 	int getMaxDarknessToSeeUnits() const { return _maxDarknessToSeeUnits; }
+	SavedBattleGame *getSave() const { return _save; }
+	const RealHdPhysicalGeometry *getRealHdPhysicalGeometry();
 
 	/// Calculates visible tiles within the field of view. Supply an eventPosition to do an update limited to a small slice of the view sector.
 	void calculateTilesInFOV(BattleUnit *unit, const Position eventPos = invalid, const int eventRadius = 0);

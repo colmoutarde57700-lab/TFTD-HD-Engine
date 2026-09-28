@@ -705,6 +705,26 @@ const Surface *BattleItem::getFloorSprite(const SurfaceSet *set, const SavedBatt
  * Gets the item's inventory sprite.
  * @return Return current inventory sprite.
  */
+int BattleItem::getInventorySpriteFrame(const SavedBattleGame *save, int animFrame) const
+{
+	const int base = _rules->getBigSprite();
+	if (base == -1) return -1; // Explicitly invisible rule; not a missing asset.
+	const int selected = ModScript::scriptFunc2<ModScript::SelectItemSprite>(
+		_rules, base, 0, this, save, BODYPART_ITEM_INVENTORY, animFrame, 0);
+	if (selected < 0)
+		throw Exception("[HD INVENTORY ERROR] Invalid selected BIGOBS identity for item '" + _rules->getType() + "'");
+	return selected;
+}
+
+bool BattleItem::hasInventoryPixelProgram() const
+{
+	// RecolorItem's built-in program only adds the supplied shade. Inventory
+	// supplies zero, so its HD equivalent is the identity palette. Event
+	// containers always convert to true: operator bool cannot distinguish a
+	// custom program from the built-in one.
+	return !_rules->getScript<ModScript::RecolorItemSprite>().isDefaultWithoutEvents();
+}
+
 const Surface *BattleItem::getBigSprite(const SurfaceSet *set, const SavedBattleGame *save, int animFrame) const
 {
 	int i = _rules->getBigSprite();

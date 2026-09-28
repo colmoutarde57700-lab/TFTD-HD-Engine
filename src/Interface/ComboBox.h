@@ -64,6 +64,11 @@ public:
 	~ComboBox();
 	/// Propagates presentation scaling to the internal button/dropdown/list.
 	void setDisplayScale(int scale, int anchorX = 0, int anchorY = 0) override;
+	/// Propagates fixed presentation-space input to the internal button/list.
+	void setPresentationInputTransform(int logicalX, int logicalY, int logicalW, int logicalH,
+		int physicalX, int physicalY, double scaleX, double scaleY) override;
+	/// Clears fixed presentation-space input from the internal button/list.
+	void clearPresentationInputTransform() override;
 	/// Sets the X position of the surface.
 	void setX(int x) override;
 	/// Sets the Y position of the surface.
@@ -95,6 +100,7 @@ public:
 	void setOptions(const std::vector<std::string> &options, bool translate = false);
 	/// Blits the combo box onto another surface.
 	void blit(SDL_Surface *surface) override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	/// Thinks arrow buttons.
 	void think() override;
 	/// Handle arrow buttons.

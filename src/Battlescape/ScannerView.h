@@ -18,6 +18,7 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "../Engine/InteractiveSurface.h"
+#include <vector>
 
 namespace OpenXcom
 {
@@ -35,11 +36,16 @@ class ScannerView : public InteractiveSurface
 	void mouseClick (Action *action, State *state) override;
 	BattleUnit *_unit;
 	int _frame;
+	struct Contact { int x, y, strength; };
+	std::vector<Contact> _contacts;
+	int _direction = 0;
+	void refreshContacts();
 public:
 	/// Create the ScannerView
 	ScannerView (int w, int h, int x, int y, Game * game, BattleUnit *unit);
 	/// Draw the scanner view
 	void draw() override;
+	void composeHd(HdCanvas &canvas, HdImageCache &images) override;
 	void animate();
 };
 }

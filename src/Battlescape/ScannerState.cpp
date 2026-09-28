@@ -1,3 +1,5 @@
+#include "../Engine/HdUiPicture.h"
+#include "../Engine/Options.h"
 /*
  * Copyright 2010-2016 OpenXcom Developers.
  *
@@ -21,6 +23,7 @@
 #include "BattlescapeGame.h"
 #include "../Engine/InteractiveSurface.h"
 #include "../Engine/Game.h"
+#include "../Engine/Logger.h"
 #include "../Engine/Action.h"
 #include "../Engine/Timer.h"
 #include "../Engine/Screen.h"
@@ -40,17 +43,18 @@ namespace OpenXcom
  */
 ScannerState::ScannerState (BattleAction *action) : _action(action)
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Options::baseXResolution = Screen::ORIGINAL_WIDTH;
-		Options::baseYResolution = Screen::ORIGINAL_HEIGHT;
-		_game->getScreen()->resetDisplay(false);
-	}
+	// BATTLE_UI_FAMILY_V1-C1: Scanner is another tactical overlay whose
+	// logical geometry belongs to UI Space, never to the variable World canvas.
+	setUiFamily(UiFamily::Battlescape);
+	setUiFamilyLegacyComposite(true);
+	Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-C1][ASSIGN] state=ScannerState family=Battlescape composite=legacy-canonical";
 	_bg = new InteractiveSurface(320, 200);
 	_scan = new Surface(320, 200);
 	_scannerView = new ScannerView(152, 152, 56, 24, _game, _action->actor);
 
-	if (_game->getScreen()->getDY() > 50)
+	int uiW = 0, uiH = 0;
+	getUiFamilyLogicalSize(uiW, uiH);
+	if ((uiH - Screen::ORIGINAL_HEIGHT) / 2 > 50)
 	{
 		_screen = false;
 	}
@@ -65,7 +69,9 @@ ScannerState::ScannerState (BattleAction *action) : _action(action)
 	centerAllSurfaces();
 
 	_game->getMod()->getSurface("DETBORD.PCK")->blitNShade(_bg, 0, 0);
+	if (Options::hdGraphics) _bg->setHdPicture(_game->getMod()->getSurface("DETBORD.PCK")->getHdPicture());
 	_game->getMod()->getSurface("DETBORD2.PCK")->blitNShade(_scan, 0, 0);
+	if (Options::hdGraphics) _scan->setHdPicture(_game->getMod()->getSurface("DETBORD2.PCK")->getHdPicture());
 	_bg->onMouseClick((ActionHandler)&ScannerState::exitClick);
 	_bg->onKeyboardPress((ActionHandler)&ScannerState::exitClick, Options::keyCancel);
 
@@ -125,11 +131,7 @@ void ScannerState::think()
  */
 void ScannerState::exitClick(Action *)
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Screen::updateScale(Options::battlescapeScale, Options::baseXBattlescape, Options::baseYBattlescape, true);
-		_game->getScreen()->resetDisplay(false);
-	}
+	// No World/base resolution mutation means no reset is required on close.
 	_game->popState();
 }
 

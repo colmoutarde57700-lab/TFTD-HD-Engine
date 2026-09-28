@@ -17,6 +17,8 @@
  * along with OpenXcom.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "Frame.h"
+#include "../Engine/HdCanvas.h"
+#include <algorithm>
 #include "../Engine/Palette.h"
 
 namespace OpenXcom
@@ -117,6 +119,30 @@ void Frame::setThickness(int thickness)
  * always aligned to the top-left corner of the screen
  * and cropped to fit the inside area.
  */
+void Frame::composeHd(HdCanvas &canvas, HdImageCache &)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas frame(getWidth(), getHeight());
+	const int mul = _contrast ? 2 : 1;
+	Uint8 color = _color + ((1 + _thickness) * mul) / 2;
+	const Uint8 darkest = Palette::blockOffset(_color / 16) + 15;
+	double x = 0, y = 0, w = getWidth(), h = getHeight();
+	for (int i = 0; i < _thickness; ++i)
+	{
+		const auto rgba = getHdColor(_thickness > 5 && (!i || i == _thickness - 1) ? darkest : color);
+		frame.rectangle({x, y, w, std::min(1.0, h)}, rgba);
+		frame.rectangle({x, y + std::max(0.0, h - 1), w, std::min(1.0, h)}, rgba);
+		frame.rectangle({x, y, std::min(1.0, w), h}, rgba);
+		frame.rectangle({x + std::max(0.0, w - 1), y, std::min(1.0, w), h}, rgba);
+		if (i < _thickness / 2) color -= mul; else color += mul;
+		++x; ++y;
+		w = w >= 2 ? w - 2 : 1;
+		h = h >= 2 ? h - 2 : 1;
+	}
+	frame.rectangle({x, y, w, h}, getHdColor(_bg));
+	composeHdLayer(canvas, frame);
+}
+
 void Frame::draw()
 {
 	Surface::draw();

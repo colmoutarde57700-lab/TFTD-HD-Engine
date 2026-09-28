@@ -53,6 +53,7 @@ class MapData
 {
 private:
 	MapDataSet *_dataset;
+	int _datasetIndex;
 	SpecialTileType _specialType;
 	bool _isUfoDoor, _stopLOS, _isNoFloor, _isGravLift, _isDoor, _blockFire, _blockSmoke, _baseModule;
 	int _yOffset, _TUWalk, _TUFly, _TUSlide, _terrainLevel, _footstepSound, _dieMCD, _altMCD;
@@ -65,10 +66,12 @@ private:
 	unsigned short _miniMapIndex;
 public:
 	static const int O_DUMMY = 999;
-	MapData(MapDataSet *dataset);
+	MapData(MapDataSet *dataset, int datasetIndex = -1);
 	~MapData();
 	/// Gets the dataset this object belongs to.
 	MapDataSet *getDataset() const;
+	/// Gets the stable logical MCD record index inside the dataset.
+	int getDatasetIndex() const;
 	/// Gets the sprite index for a certain frame.
 	int getSprite(int frameID) const;
 	/// Sets the sprite index for a certain frame.

@@ -19,6 +19,7 @@
 #include "ActionMenuItem.h"
 #include "../Interface/Text.h"
 #include "../Interface/Frame.h"
+#include "../Engine/HdCanvas.h"
 #include "../Engine/Game.h"
 #include "../Mod/Mod.h"
 #include "../Mod/RuleInterface.h"
@@ -48,22 +49,30 @@ ActionMenuItem::ActionMenuItem(int id, Game *game, int x, int y) : InteractiveSu
 	_frame->setSecondaryColor(actionMenu->color2);
 	_frame->setThickness(8);
 
-	_txtDescription = new Text(200, 20, 10, 13);
+	// BATTLE_UI_FAMILY_V1-C2 R3: the TFTD action menu was authored with all
+	// three columns forced to FONT_BIG. Once the popup is presented at the
+	// stable Battlescape UI footprint this becomes visibly oversized, and the
+	// old TU surface (x=210,w=80) even extends 18 logical pixels beyond the
+	// 272px item. Keep the historical non-TFTD typography untouched, but use
+	// the compact TFTD font and bounded columns for TFTD mode.
+	const int textY = actionMenu->TFTDMode ? 16 : 13;
+
+	_txtDescription = new Text(200, 20, 10, textY);
 	_txtDescription->initText(big, small, lang);
-	_txtDescription->setBig();
+	if (actionMenu->TFTDMode) _txtDescription->setSmall(); else _txtDescription->setBig();
 	_txtDescription->setHighContrast(true);
 	_txtDescription->setColor(actionMenu->color);
 	_txtDescription->setVisible(true);
 
-	_txtAcc = new Text(100, 20, 140, 13);
+	_txtAcc = new Text(actionMenu->TFTDMode ? 70 : 100, 20, 140, textY);
 	_txtAcc->initText(big, small, lang);
-	_txtAcc->setBig();
+	if (actionMenu->TFTDMode) _txtAcc->setSmall(); else _txtAcc->setBig();
 	_txtAcc->setHighContrast(true);
 	_txtAcc->setColor(actionMenu->color);
 
-	_txtTU = new Text(80, 20, 210, 13);
+	_txtTU = new Text(actionMenu->TFTDMode ? 52 : 80, 20, 210, textY);
 	_txtTU->initText(big, small, lang);
-	_txtTU->setBig();
+	if (actionMenu->TFTDMode) _txtTU->setSmall(); else _txtTU->setBig();
 	_txtTU->setHighContrast(true);
 	_txtTU->setColor(actionMenu->color);
 }
@@ -157,6 +166,17 @@ void ActionMenuItem::draw()
 	_txtDescription->blit(this->getSurface());
 	_txtAcc->blit(this->getSurface());
 	_txtTU->blit(this->getSurface());
+}
+
+void ActionMenuItem::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas content(getWidth(), getHeight());
+	_frame->composeHd(content, images);
+	_txtDescription->composeHd(content, images);
+	_txtAcc->composeHd(content, images);
+	_txtTU->composeHd(content, images);
+	composeHdLayer(canvas, content);
 }
 
 /**

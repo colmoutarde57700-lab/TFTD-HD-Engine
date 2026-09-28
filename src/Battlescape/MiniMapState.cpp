@@ -18,6 +18,7 @@
  */
 #include "MiniMapState.h"
 #include "../Engine/Game.h"
+#include "../Engine/Logger.h"
 #include "../Engine/Screen.h"
 #include "../Interface/BattlescapeButton.h"
 #include "../Mod/Mod.h"
@@ -41,12 +42,13 @@ namespace OpenXcom
  */
 MiniMapState::MiniMapState (Camera * camera, SavedBattleGame * battleGame)
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Options::baseXResolution = Screen::ORIGINAL_WIDTH;
-		Options::baseYResolution = Screen::ORIGINAL_HEIGHT;
-		_game->getScreen()->resetDisplay(false);
-	}
+	// BATTLE_UI_FAMILY_V1-C1: the minimap is a tactical UI overlay, not a
+	// World-sized State. Keep its historical 320x200 composition inside the
+	// canonical Battlescape UI canvas and let PresentationSpaces own physical
+	// sizing/input. Do not mutate the shared base resolution.
+	setUiFamily(UiFamily::Battlescape);
+	setUiFamilyLegacyComposite(true);
+	Log(LOG_INFO) << "[BATTLE-UI FAMILY V1-C1][ASSIGN] state=MiniMapState family=Battlescape composite=legacy-canonical";
 
 	_bg = new Surface(320, 200);
 	_miniMapView = new MiniMapView(221, 148, 48, 16, _game, camera, battleGame);
@@ -67,9 +69,16 @@ MiniMapState::MiniMapState (Camera * camera, SavedBattleGame * battleGame)
 	add(_txtLevel, "textLevel", "minimap", _bg);
 
 	centerAllSurfaces();
+	// Preserve the existing independent minimapScale option, but apply it
+	// INSIDE UiFamily::Battlescape rather than through the World canvas.
 	setPresentationScale(Options::getMiniMapScale());
 
-	if (_game->getScreen()->getDY() > 50)
+	// Match the validated 640x360 tactical UI reference. Historically this
+	// branch depended on Screen::getDY(), which changed with World zoom.
+	// In the family-owned canvas the canonical vertical margin is stable.
+	int uiW = 0, uiH = 0;
+	getUiFamilyLogicalSize(uiW, uiH);
+	if ((uiH - Screen::ORIGINAL_HEIGHT) / 2 > 50)
 	{
 		_screen = false;
 		_bg->drawRect(46, 14, 223, 151, Palette::blockOffset(15)+15);
@@ -123,11 +132,8 @@ void MiniMapState::handle(Action *action)
  */
 void MiniMapState::btnOkClick(Action *)
 {
-	if (Options::maximizeInfoScreens)
-	{
-		Screen::updateScale(Options::battlescapeScale, Options::baseXBattlescape, Options::baseYBattlescape, true);
-		_game->getScreen()->resetDisplay(false);
-	}
+	// Family presentation never changed the shared World/base resolution, so
+	// closing the overlay must not force a scale/reset cycle.
 	_game->popState();
 }
 

@@ -41,6 +41,13 @@ private:
 	static const SDLKey SDLK_ANY;
 	Uint8 _buttonsPressed;
 	std::string _tooltip;
+	// Presentation-spaces input override. When enabled, hit-testing is performed
+	// in an explicit logical UI rectangle mapped to a physical content rect,
+	// instead of implicitly reusing the current Screen/World scale.
+	bool _presentationInputEnabled;
+	int _presentationInputX, _presentationInputY, _presentationInputW, _presentationInputH;
+	int _presentationInputPhysicalX, _presentationInputPhysicalY;
+	double _presentationInputScaleX, _presentationInputScaleY;
 
 protected:
 	std::map<Uint8, ActionHandler> _click, _press, _release;
@@ -63,6 +70,13 @@ public:
 	void setVisible(bool visible) override;
 	/// Processes any pending events.
 	virtual void handle(Action *action, State *state);
+	/// Routes hit-testing through an explicit logical presentation rectangle.
+	virtual void setPresentationInputTransform(int logicalX, int logicalY, int logicalW, int logicalH,
+		int physicalX, int physicalY, double scaleX, double scaleY);
+	/// Restores historical Screen/World-space input handling.
+	virtual void clearPresentationInputTransform();
+	/// Returns whether this surface currently uses a presentation-space input transform.
+	bool hasPresentationInputTransform() const { return _presentationInputEnabled; }
 	/// Sets the focus of this surface.
 	virtual void setFocus(bool focus, bool modal = false);
 	/// Gets the focus of this surface.

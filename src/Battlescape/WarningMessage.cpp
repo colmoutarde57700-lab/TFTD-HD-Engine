@@ -22,6 +22,7 @@
 #include "../fmath.h"
 #include "../Engine/Timer.h"
 #include "../Interface/Text.h"
+#include "../Engine/HdCanvas.h"
 
 namespace OpenXcom
 {
@@ -144,6 +145,15 @@ void WarningMessage::draw()
 	Surface::draw();
 	drawRect(0, 0, getWidth(), getHeight(), _color + Clamp(24 - _fade, 0, 12));
 	_text->blit(this->getSurface());
+}
+
+void WarningMessage::composeHd(HdCanvas &canvas, HdImageCache &images)
+{
+	if (!isDisplayVisible()) return;
+	HdCanvas content(getWidth(), getHeight());
+	content.rectangle(content.bounds(), getHdColor(static_cast<Uint8>(_color + Clamp(24 - _fade, 0, 12))));
+	_text->composeHd(content, images);
+	composeHdLayer(canvas, content);
 }
 
 }

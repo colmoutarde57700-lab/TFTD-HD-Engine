@@ -150,6 +150,10 @@ public:
 	const Surface *getFloorSprite(const SurfaceSet *set, const SavedBattleGame *save, int animFrame, int shade) const;
 	/// Gets the item's inventory sprite.
 	const Surface *getBigSprite(const SurfaceSet *set, const SavedBattleGame *save, int animFrame) const;
+	/// Select an inventory asset identity without probing native sprite pixels/frames.
+	int getInventorySpriteFrame(const SavedBattleGame *save, int animFrame) const;
+	/// Pixel programs require an explicit HD material implementation.
+	bool hasInventoryPixelProgram() const;
 
 	/// Check if item can use any ammo.
 	bool isWeaponWithAmmo() const;
