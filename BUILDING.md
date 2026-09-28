@@ -13,6 +13,6 @@ ctest --test-dir build-release --output-on-failure
 python tests/validate_shaders.py --output build-release/shader-validation
 ```
 
-v0.2.0 is the proposed next prerelease tag; until published, use the supplied source snapshot. HLSL validation needs Windows d3dcompiler_47.dll. Resource paths are relative to the source root. Keep copied DLLs beside build-release/bin/openxcom.exe.
+HLSL validation needs Windows d3dcompiler_47.dll. Resource paths are relative to the source root. Keep copied DLLs beside build-release/bin/openxcom.exe. The Windows release package supplies those DLLs for a fresh source checkout.
 
 real_hd_pixel_firewall is required on each engine build. BUILD_HD_CONTRACT_TESTS enables the delivered P2ZJ storey/caustic regression without game data or private art. Build metadata records the exact source commit and hashes. Bit-for-bit identity across tool versions, directories or Git metadata, or with the historical private executable, is not promised.
