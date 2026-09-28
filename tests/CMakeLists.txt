@@ -1,4 +1,7 @@
 add_executable(p2zj_regression p2zj_regression.cpp ../src/Battlescape/RealHdPhysicalGeometry.cpp)
 target_include_directories(p2zj_regression PRIVATE ../src/Battlescape ../src/Engine)
 target_compile_features(p2zj_regression PRIVATE cxx_std_17)
+if(MINGW)
+  target_link_libraries(p2zj_regression PRIVATE -static)
+endif()
 add_test(NAME p2zj_storeys_and_caustics COMMAND p2zj_regression)

@@ -1,6 +1,6 @@
 # Build P2ZJ on Windows x64
 
-Reference tools: LLVM-MinGW UCRT 2026-08-26 (Clang 23.1.0), CMake and Ninja. Put CMake and Ninja on PATH. Bundled SDL/media import libraries and runtime DLLs are in deps/lib/x64.
+Reference tools: LLVM-MinGW UCRT 2026-08-26 (Clang 23.1.0), CMake and Ninja. Put CMake and Ninja on PATH. SDL import libraries are tracked in deps/lib/x64. Runtime DLLs are distributed in the Windows release package, not tracked in Git. Copy those DLLs into deps/lib/x64 before building, or beside the resulting executable before running it.
 
 From the repository root in PowerShell:
 
