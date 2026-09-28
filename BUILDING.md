@@ -7,7 +7,7 @@ From the repository root in PowerShell:
 ```powershell
 git checkout v0.2.0
 $env:LLVM_MINGW_ROOT = 'C:/Tools/llvm-mingw-20260826-ucrt-x86_64'
-cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=toolchain-llvm-mingw-x64.cmake -DBUILD_PACKAGE=ON -DDEV_BUILD=ON -DBUILD_HD_CONTRACT_TESTS=ON
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$PWD/toolchain-llvm-mingw-x64.cmake" -DBUILD_PACKAGE=ON -DDEV_BUILD=ON -DBUILD_HD_CONTRACT_TESTS=ON
 cmake --build build-release --parallel 8
 ctest --test-dir build-release --output-on-failure
 python tests/validate_shaders.py --output build-release/shader-validation
